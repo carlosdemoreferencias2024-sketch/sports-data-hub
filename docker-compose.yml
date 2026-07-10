@@ -9,7 +9,7 @@ services:
       NODE_ENV: development
       PORT: 3000
       HOST: 0.0.0.0
-      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-sports_admin}:${POSTGRES_PASSWORD:-sports_dev_password}@db-postgres:5432/${POSTGRES_DB:-sports_db}}
+      DATABASE_URL: postgres://${POSTGRES_USER:-sports_admin}:${POSTGRES_PASSWORD:-sports_dev_password}@db-postgres:5432/${POSTGRES_DB:-sports_db}
       REDIS_URL: redis://cache-redis:6379
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev_internal_api_key}
       API_KEY: ${API_KEY:-dev_internal_api_key}
@@ -72,7 +72,7 @@ services:
     volumes:
       - ./workers:/app
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-sports_admin}:${POSTGRES_PASSWORD:-sports_dev_password}@db-postgres:5432/${POSTGRES_DB:-sports_db}}
+      DATABASE_URL: postgres://${POSTGRES_USER:-sports_admin}:${POSTGRES_PASSWORD:-sports_dev_password}@db-postgres:5432/${POSTGRES_DB:-sports_db}
       API_URL: http://engine-node:3000/api/v1/internal/matches/batch
       BATCH_INGESTION_URL: http://engine-node:3000/api/v1/internal/matches/batch
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev_internal_api_key}
@@ -131,7 +131,7 @@ services:
     working_dir: /app
     environment:
       HUB_BASE_URL: http://engine-node:3000
-      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-sports_admin}:${POSTGRES_PASSWORD:-sports_dev_password}@db-postgres:5432/${POSTGRES_DB:-sports_db}}
+      DATABASE_URL: postgres://${POSTGRES_USER:-sports_admin}:${POSTGRES_PASSWORD:-sports_dev_password}@db-postgres:5432/${POSTGRES_DB:-sports_db}
       INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev_internal_api_key}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
