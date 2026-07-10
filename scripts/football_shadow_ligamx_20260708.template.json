@@ -1,0 +1,44 @@
+{
+  "signals": [
+    {
+      "match_id": "5034d120-c3a0-4762-8f50-d4a273a08e6d",
+      "league": "liga mx",
+      "market": "moneyline_3way",
+      "selection": "home",
+      "home_team": "Necaxa",
+      "away_team": "Atlante",
+      "kickoff": "REPLACE_WITH_REAL_KICKOFF",
+      "odds_timestamp": "REPLACE_WITH_REAL_ODDS_TIMESTAMP",
+      "provider": "manual_shadow_liga_mx",
+      "model_probability": 0.1964,
+      "market_odds": 0,
+      "expected_value": 0,
+      "raw_data": {
+        "source": "pending_manual_liga_mx_odds",
+        "source_match_id": "espn-liga-mx-event-necaxa-atlante",
+        "manual_review": true,
+        "note": "ESPN fixture did not include odds and match_date looked like scrape time; fill real kickoff, odds_timestamp, and market_odds before dry-run/apply."
+      }
+    },
+    {
+      "match_id": "4ffc9909-d194-4a47-a532-afca57545101",
+      "league": "liga mx",
+      "market": "moneyline_3way",
+      "selection": "home",
+      "home_team": "Tijuana",
+      "away_team": "Tigres UANL",
+      "kickoff": "REPLACE_WITH_REAL_KICKOFF",
+      "odds_timestamp": "REPLACE_WITH_REAL_ODDS_TIMESTAMP",
+      "provider": "manual_shadow_liga_mx",
+      "model_probability": 0.1964,
+      "market_odds": 0,
+      "expected_value": 0,
+      "raw_data": {
+        "source": "pending_manual_liga_mx_odds",
+        "source_match_id": "espn-liga-mx-event-tijuana-tigres-uanl",
+        "manual_review": true,
+        "note": "ESPN fixture did not include odds and match_date looked like scrape time; fill real kickoff, odds_timestamp, and market_odds before dry-run/apply."
+      }
+    }
+  ]
+}

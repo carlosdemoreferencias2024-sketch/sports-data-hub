@@ -1,0 +1,21 @@
+{
+  "fixtures": [
+    {
+      "league": "liga mx",
+      "home_team": "Equipo Local",
+      "away_team": "Equipo Visitante",
+      "kickoff": "2026-07-08T20:00:00-06:00",
+      "status": "scheduled"
+    },
+    {
+      "league": "mls",
+      "home_team": "MLS Local",
+      "away_team": "MLS Visitante",
+      "kickoff": "2026-07-08T19:30:00-05:00",
+      "status": "finished",
+      "home_score": 2,
+      "away_score": 1,
+      "finished_at": "2026-07-08T21:30:00-05:00"
+    }
+  ]
+}

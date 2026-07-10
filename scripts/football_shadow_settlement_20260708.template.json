@@ -1,0 +1,73 @@
+{
+  "results": [
+    {
+      "match_id": "842e8909-ef9d-46a6-996f-38f40d67f44c",
+      "league": "mls",
+      "home_score": 0,
+      "away_score": 0,
+      "finished_at": "REPLACE_WITH_FINISHED_AT",
+      "result_source": "manual_result"
+    },
+    {
+      "match_id": "aa1a8f4d-804e-4fb9-ae0a-4ad497778bff",
+      "league": "mls",
+      "home_score": 0,
+      "away_score": 0,
+      "finished_at": "REPLACE_WITH_FINISHED_AT",
+      "result_source": "manual_result"
+    },
+    {
+      "match_id": "25e4184a-0607-451d-8ce3-ce2d99c199eb",
+      "league": "mls",
+      "home_score": 0,
+      "away_score": 0,
+      "finished_at": "REPLACE_WITH_FINISHED_AT",
+      "result_source": "manual_result"
+    },
+    {
+      "match_id": "5034d120-c3a0-4762-8f50-d4a273a08e6d",
+      "league": "liga mx",
+      "home_score": 0,
+      "away_score": 0,
+      "finished_at": "REPLACE_WITH_FINISHED_AT",
+      "result_source": "manual_result"
+    },
+    {
+      "match_id": "4ffc9909-d194-4a47-a532-afca57545101",
+      "league": "liga mx",
+      "home_score": 0,
+      "away_score": 0,
+      "finished_at": "REPLACE_WITH_FINISHED_AT",
+      "result_source": "manual_result"
+    }
+  ],
+  "closing_odds": [
+    {
+      "match_id": "842e8909-ef9d-46a6-996f-38f40d67f44c",
+      "market": "moneyline_3way",
+      "selection": "home",
+      "closing_odds": 0,
+      "closing_odds_timestamp": "REPLACE_WITH_CLOSING_ODDS_TIMESTAMP",
+      "closing_odds_provider": "manual_closing",
+      "closing_line_source": "manual_closing"
+    },
+    {
+      "match_id": "aa1a8f4d-804e-4fb9-ae0a-4ad497778bff",
+      "market": "moneyline_3way",
+      "selection": "home",
+      "closing_odds": 0,
+      "closing_odds_timestamp": "REPLACE_WITH_CLOSING_ODDS_TIMESTAMP",
+      "closing_odds_provider": "manual_closing",
+      "closing_line_source": "manual_closing"
+    },
+    {
+      "match_id": "25e4184a-0607-451d-8ce3-ce2d99c199eb",
+      "market": "moneyline_3way",
+      "selection": "home",
+      "closing_odds": 0,
+      "closing_odds_timestamp": "REPLACE_WITH_CLOSING_ODDS_TIMESTAMP",
+      "closing_odds_provider": "manual_closing",
+      "closing_line_source": "manual_closing"
+    }
+  ]
+}

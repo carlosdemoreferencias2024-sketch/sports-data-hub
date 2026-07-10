@@ -1,0 +1,262 @@
+name: sports-data-hub
+
+services:
+  engine-node:
+    build:
+      context: ./backend
+    container_name: data_hub_engine
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      HOST: 0.0.0.0
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-sports_admin}:${POSTGRES_PASSWORD:-sports_dev_password}@db-postgres:5432/${POSTGRES_DB:-sports_db}}
+      REDIS_URL: redis://cache-redis:6379
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev_internal_api_key}
+      API_KEY: ${API_KEY:-dev_internal_api_key}
+      RATE_LIMIT_MAX: 60
+      RATE_LIMIT_WINDOW: 1 minute
+    ports:
+      - "4000:3000"
+    depends_on:
+      db-postgres:
+        condition: service_healthy
+      cache-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - data_hub_network
+
+  db-postgres:
+    image: postgres:16-alpine
+    container_name: data_hub_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sports_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sports_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-sports_db}
+    ports:
+      - "5433:5432"
+    volumes:
+      - data_hub_postgres_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+      - ./database/seeds.sql:/docker-entrypoint-initdb.d/002_seeds.sql:ro
+      - ./database/migrations:/migrations:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sports_admin -d sports_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - data_hub_network
+
+  cache-redis:
+    image: redis:7-alpine
+    container_name: data_hub_redis
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - data_hub_network
+
+  scraper-soccer:
+    image: python:3.12-slim
+    container_name: data_hub_scraper_soccer
+    working_dir: /app
+    volumes:
+      - ./workers:/app
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-sports_admin}:${POSTGRES_PASSWORD:-sports_dev_password}@db-postgres:5432/${POSTGRES_DB:-sports_db}}
+      API_URL: http://engine-node:3000/api/v1/internal/matches/batch
+      BATCH_INGESTION_URL: http://engine-node:3000/api/v1/internal/matches/batch
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev_internal_api_key}
+      SOCCER_FIXTURE_PATH: fixtures/soccer_scoreboard.html
+      SOCCER_SOURCE_MODE: espn
+      SOCCER_SOURCE_SLUG: espn-mexico
+      ESPN_SOCCER_RESULTS_URL: https://www.espn.com.mx/futbol/resultados/_/liga/mex.1
+      SOCCER_LEAGUE_CONFIGS: "liga-mx|espn-mexico|Liga MX|https://www.espn.com.mx/futbol/resultados/_/liga/mex.1;mls|espn-mls|MLS|https://www.espn.com.mx/futbol/resultados/_/liga/usa.1;premier-league|espn-premier-league|Premier League|https://www.espn.com.mx/futbol/resultados/_/liga/eng.1;la-liga|espn-la-liga|La Liga|https://www.espn.com.mx/futbol/resultados/_/liga/esp.1;serie-a|espn-serie-a|Serie A|https://www.espn.com.mx/futbol/resultados/_/liga/ita.1;bundesliga|espn-bundesliga|Bundesliga|https://www.espn.com.mx/futbol/resultados/_/liga/ger.1;ligue-1|espn-ligue-1|Ligue 1|https://www.espn.com.mx/futbol/resultados/_/liga/fra.1;uefa-champions-league|espn-uefa-champions-league|UEFA Champions League|https://www.espn.com.mx/futbol/resultados/_/liga/uefa.champions;fifa-world-cup-2026|espn-fifa-world-cup-2026|Copa Mundial FIFA|https://www.espn.com.mx/futbol/resultados/_/liga/fifa.world"
+      SHADOW_MODE: "false"
+      SOCCER_SCRAPER_INTERVAL_SECONDS: 300
+    command: >
+      sh -c "pip install --no-cache-dir -r requirements.txt &&
+             python soccer_scraper.py --loop"
+    depends_on:
+      engine-node:
+        condition: service_healthy
+      db-postgres:
+        condition: service_healthy
+    networks:
+      - data_hub_network
+
+  scraper-mlb:
+    image: python:3.12-slim
+    container_name: data_hub_scraper_mlb
+    working_dir: /app
+    volumes:
+      - ./workers:/app
+    environment:
+      API_URL: http://engine-node:3000/api/v1/internal/matches/batch
+      BATCH_INGESTION_URL: http://engine-node:3000/api/v1/internal/matches/batch
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev_internal_api_key}
+      MLB_FIXTURE_PATH: fixtures/sample_scoreboard.html
+      MLB_SOURCE_MODE: espn
+      MLB_SOURCE_SLUG: espn-mlb
+      ESPN_MLB_RESULTS_URL: https://www.espn.com.mx/beisbol/mlb/resultados
+      MLB_SHADOW_MODE: "false"
+      MLB_SCRAPER_INTERVAL_SECONDS: 60
+    command: >
+      sh -c "pip install --no-cache-dir -r requirements.txt &&
+             python mlb_scraper.py --loop"
+    depends_on:
+      engine-node:
+        condition: service_started
+      db-postgres:
+        condition: service_healthy
+    networks:
+      - data_hub_network
+
+  odds-worker:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile.odds
+    container_name: data_hub_odds_worker
+    profiles:
+      - odds
+    working_dir: /app
+    environment:
+      HUB_BASE_URL: http://engine-node:3000
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-sports_admin}:${POSTGRES_PASSWORD:-sports_dev_password}@db-postgres:5432/${POSTGRES_DB:-sports_db}}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev_internal_api_key}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      ALPHA_NOTIFY_MIN_EV: ${ALPHA_NOTIFY_MIN_EV:-0.05}
+      ODDS_SOURCE_URL: ${ODDS_SOURCE_URL:-}
+      ODDS_SOURCE_MODE: ${ODDS_SOURCE_MODE:-generic}
+      ODDS_SOURCE_DETAIL_URL: ${ODDS_SOURCE_DETAIL_URL:-}
+      ODDS_SOURCE_PROVIDER: ${ODDS_SOURCE_PROVIDER:-external_odds}
+      ODDS_SOURCE_API_KEY: ${ODDS_SOURCE_API_KEY:-}
+      ODDS_SOURCE_API_KEY_HEADER: ${ODDS_SOURCE_API_KEY_HEADER:-Authorization}
+      ODDS_SOURCE_HOST: ${ODDS_SOURCE_HOST:-}
+      ODDS_SOURCE_HOST_HEADER: ${ODDS_SOURCE_HOST_HEADER:-x-rapidapi-host}
+      ODDS_SOURCE_SKIP_ESPORTS: ${ODDS_SOURCE_SKIP_ESPORTS:-true}
+      ODDS_SOURCE_ALLOW_REVERSED_MATCH: ${ODDS_SOURCE_ALLOW_REVERSED_MATCH:-false}
+      ODDS_SOURCE_ALLOW_DISCOVERY_MATCH: ${ODDS_SOURCE_ALLOW_DISCOVERY_MATCH:-false}
+      ODDS_SOURCE_MAX_PAGES: ${ODDS_SOURCE_MAX_PAGES:-5}
+      ODDS_SOURCE_MAX_DETAIL_REQUESTS: ${ODDS_SOURCE_MAX_DETAIL_REQUESTS:-50}
+      ODDS_SOURCE_DETAIL_DELAY_SECONDS: ${ODDS_SOURCE_DETAIL_DELAY_SECONDS:-1.0}
+      ODDS_WORKER_INTERVAL_SECONDS: ${ODDS_WORKER_INTERVAL_SECONDS:-300}
+      ODDS_WORKER_HEALTH_PORT: 8080
+      ODDS_WORKER_STALE_SECONDS: ${ODDS_WORKER_STALE_SECONDS:-600}
+      WORKER_HTTP_MAX_RETRIES: ${WORKER_HTTP_MAX_RETRIES:-4}
+      WORKER_HTTP_BACKOFF_BASE_SECONDS: ${WORKER_HTTP_BACKOFF_BASE_SECONDS:-15}
+      WORKER_HTTP_BACKOFF_MAX_SECONDS: ${WORKER_HTTP_BACKOFF_MAX_SECONDS:-300}
+      SPORTSDATAIO_MLB_ENABLED: ${SPORTSDATAIO_MLB_ENABLED:-false}
+      SPORTSDATAIO_API_KEY: ${SPORTSDATAIO_API_KEY:-}
+      SPORTSDATAIO_BASE_URL: ${SPORTSDATAIO_BASE_URL:-https://api.sportsdata.io/v3/mlb}
+      SPORTSDATAIO_TIMEOUT_SECONDS: ${SPORTSDATAIO_TIMEOUT_SECONDS:-10}
+      SPORTMONKS_MLB_ENABLED: ${SPORTMONKS_MLB_ENABLED:-false}
+      SPORTMONKS_API_KEY: ${SPORTMONKS_API_KEY:-}
+      SPORTMONKS_MLB_SCHEDULE_URL_TEMPLATE: ${SPORTMONKS_MLB_SCHEDULE_URL_TEMPLATE:-}
+      SPORTMONKS_TIMEOUT_SECONDS: ${SPORTMONKS_TIMEOUT_SECONDS:-10}
+      SOURCE_MANAGER_MIN_CONSENSUS: ${SOURCE_MANAGER_MIN_CONSENSUS:-}
+      PREBET_STRICT_DATE: ${PREBET_STRICT_DATE:-true}
+      PREBET_MAX_MARKET_AGE_SECONDS: ${PREBET_MAX_MARKET_AGE_SECONDS:-1200}
+    depends_on:
+      engine-node:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - data_hub_network
+
+  football-data-worker:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile.odds
+    container_name: data_hub_football_data_worker
+    profiles:
+      - football-data
+    working_dir: /app
+    command: python football_worker.py
+    environment:
+      FOOTBALL_DATA_URL: ${FOOTBALL_DATA_URL:-}
+      FOOTBALL_API_KEY: ${FOOTBALL_API_KEY:-}
+      FOOTBALL_API_HOST: ${FOOTBALL_API_HOST:-free-api-live-football-data.p.rapidapi.com}
+      FOOTBALL_WORKER_INTERVAL_SECONDS: ${FOOTBALL_WORKER_INTERVAL_SECONDS:-900}
+      FOOTBALL_WORKER_HEALTH_PORT: 8080
+      WORKER_HTTP_MAX_RETRIES: ${WORKER_HTTP_MAX_RETRIES:-4}
+      WORKER_HTTP_BACKOFF_BASE_SECONDS: ${WORKER_HTTP_BACKOFF_BASE_SECONDS:-15}
+      WORKER_HTTP_BACKOFF_MAX_SECONDS: ${WORKER_HTTP_BACKOFF_MAX_SECONDS:-300}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - data_hub_network
+
+  analytics-bot:
+    build:
+      context: ./analytics
+    container_name: data_hub_analytics_bot
+    profiles:
+      - analytics
+    working_dir: /app
+    volumes:
+      - ./analytics:/app
+    environment:
+      API_BASE_URL: http://engine-node:3000
+      API_URL: http://engine-node:3000/api/v1
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev_internal_api_key}
+      ANALYTICS_LEAGUES: liga-mx,mlb
+      MIN_EV_THRESHOLD: "0.02"
+      MIN_PLAYED_FOR_SIGNAL: "2"
+      PAPER_TRADE_ENABLED: "true"
+      MODEL_VERSION: pronostix-v2-snapshots
+    command: python analytics_bot.py
+    depends_on:
+      engine-node:
+        condition: service_started
+    networks:
+      - data_hub_network
+
+  metabase:
+    image: metabase/metabase:v0.50.29
+    container_name: data_hub_metabase
+    profiles:
+      - bi
+    environment:
+      MB_SITE_NAME: Sports Data Hub BI
+      MB_DB_FILE: /metabase-data/metabase.db
+      JAVA_TIMEZONE: ${METABASE_TIMEZONE:-America/Matamoros}
+    ports:
+      - "${METABASE_PORT:-3001}:3000"
+    volumes:
+      - data_hub_metabase_data:/metabase-data
+    depends_on:
+      db-postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - data_hub_network
+
+networks:
+  data_hub_network:
+    name: data_hub_network
+
+volumes:
+  data_hub_postgres_data:
+    name: data_hub_postgres_data
+  data_hub_metabase_data:
+    name: data_hub_metabase_data

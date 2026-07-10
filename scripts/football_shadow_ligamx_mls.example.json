@@ -1,0 +1,46 @@
+{
+  "signals": [
+    {
+      "match_id": "88888888-8888-4888-8888-888888888881",
+      "league": "liga mx",
+      "market": "moneyline_3way",
+      "selection": "home",
+      "home_team": "Liga MX Home",
+      "away_team": "Liga MX Away",
+      "kickoff": "2026-07-06T20:00:00-06:00",
+      "odds_timestamp": "2026-07-06T14:30:00-06:00",
+      "provider": "manual_shadow_liga_mx",
+      "model_probability": 0.56,
+      "market_odds": 2.1,
+      "expected_value": 0.05
+    },
+    {
+      "match_id": "88888888-8888-4888-8888-888888888882",
+      "league": "liga mx",
+      "market": "total_goals_2_5",
+      "selection": "over_2_5",
+      "home_team": "Liga MX Home",
+      "away_team": "Liga MX Away",
+      "kickoff": "2026-07-06T20:00:00-06:00",
+      "odds_timestamp": "2026-07-06T14:31:00-06:00",
+      "provider": "manual_shadow_liga_mx",
+      "model_probability": 0.55,
+      "market_odds": 1.95,
+      "expected_value": 0.04
+    },
+    {
+      "match_id": "99999999-9999-4999-8999-999999999991",
+      "league": "mls",
+      "market": "draw_no_bet",
+      "selection": "home_dnb",
+      "home_team": "MLS Home",
+      "away_team": "MLS Away",
+      "kickoff": "2026-07-06T19:30:00-06:00",
+      "odds_timestamp": "2026-07-06T14:35:00-06:00",
+      "provider": "manual_shadow_mls",
+      "model_probability": 0.58,
+      "market_odds": 1.8,
+      "expected_value": 0.03
+    }
+  ]
+}

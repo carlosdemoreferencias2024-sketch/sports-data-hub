@@ -1,0 +1,23 @@
+{
+  "results": [
+    {
+      "match_id": "88888888-8888-4888-8888-888888888881",
+      "league": "liga mx",
+      "home_score": 2,
+      "away_score": 1,
+      "finished_at": "2026-07-06T22:00:00-06:00",
+      "result_source": "manual_result"
+    }
+  ],
+  "closing_odds": [
+    {
+      "match_id": "88888888-8888-4888-8888-888888888881",
+      "market": "moneyline_3way",
+      "selection": "home",
+      "closing_odds": 1.95,
+      "closing_odds_timestamp": "2026-07-06T19:55:00-06:00",
+      "closing_odds_provider": "manual_closing",
+      "closing_line_source": "manual_closing"
+    }
+  ]
+}

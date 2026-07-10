@@ -1,0 +1,46 @@
+{
+  "date": "2026-07-08",
+  "source": "manual_global_football_today",
+  "fixtures": [
+    {
+      "league": "brasileirao",
+      "home_team": "Flamengo",
+      "away_team": "Palmeiras",
+      "kickoff": "2026-07-08T20:00:00-03:00",
+      "status": "scheduled"
+    },
+    {
+      "league": "liga argentina",
+      "home_team": "River Plate",
+      "away_team": "Boca Juniors",
+      "kickoff": "2026-07-08T19:00:00-03:00",
+      "status": "scheduled"
+    }
+  ],
+  "signals": [
+    {
+      "league": "brasileirao",
+      "market": "moneyline_3way",
+      "selection": "home",
+      "home_team": "Flamengo",
+      "away_team": "Palmeiras",
+      "kickoff": "2026-07-08T20:00:00-03:00",
+      "odds_timestamp": "2026-07-08T13:00:00-05:00",
+      "provider": "manual_shadow_global_football",
+      "market_odds": 2.1
+    },
+    {
+      "league": "liga argentina",
+      "market": "draw_no_bet",
+      "selection": "home_dnb",
+      "home_team": "River Plate",
+      "away_team": "Boca Juniors",
+      "kickoff": "2026-07-08T19:00:00-03:00",
+      "odds_timestamp": "2026-07-08T13:00:00-05:00",
+      "provider": "manual_shadow_global_football",
+      "market_odds": 1.85,
+      "model_probability": 0.57,
+      "expected_value": 0.054
+    }
+  ]
+}

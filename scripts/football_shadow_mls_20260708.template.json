@@ -1,0 +1,64 @@
+{
+  "signals": [
+    {
+      "match_id": "842e8909-ef9d-46a6-996f-38f40d67f44c",
+      "league": "mls",
+      "market": "moneyline_3way",
+      "selection": "home",
+      "home_team": "CF Montreal",
+      "away_team": "Toronto FC",
+      "kickoff": "REPLACE_WITH_REAL_KICKOFF",
+      "odds_timestamp": "2026-07-08T13:36:57Z",
+      "provider": "manual_shadow_mls_espn",
+      "model_probability": 0.7334,
+      "market_odds": 1.82,
+      "expected_value": 0.3348,
+      "raw_data": {
+        "source": "espn_mls_raw_odds",
+        "source_match_id": "espn-mls-event-cf-montreal-toronto-fc",
+        "manual_review": true,
+        "note": "Fill real kickoff before dry-run/apply. ESPN match_date looked like scrape time, not kickoff."
+      }
+    },
+    {
+      "match_id": "aa1a8f4d-804e-4fb9-ae0a-4ad497778bff",
+      "league": "mls",
+      "market": "moneyline_3way",
+      "selection": "home",
+      "home_team": "Chicago Fire FC",
+      "away_team": "Vancouver Whitecaps",
+      "kickoff": "REPLACE_WITH_REAL_KICKOFF",
+      "odds_timestamp": "2026-07-08T13:36:57Z",
+      "provider": "manual_shadow_mls_espn",
+      "model_probability": 0.7334,
+      "market_odds": 2.7,
+      "expected_value": 0.9802,
+      "raw_data": {
+        "source": "espn_mls_raw_odds",
+        "source_match_id": "espn-mls-event-chicago-fire-fc-vancouver-whitecaps",
+        "manual_review": true,
+        "note": "Fill real kickoff before dry-run/apply. ESPN match_date looked like scrape time, not kickoff."
+      }
+    },
+    {
+      "match_id": "25e4184a-0607-451d-8ce3-ce2d99c199eb",
+      "league": "mls",
+      "market": "moneyline_3way",
+      "selection": "home",
+      "home_team": "Seattle Sounders FC",
+      "away_team": "Portland Timbers",
+      "kickoff": "REPLACE_WITH_REAL_KICKOFF",
+      "odds_timestamp": "2026-07-08T13:36:57Z",
+      "provider": "manual_shadow_mls_espn",
+      "model_probability": 0.0775,
+      "market_odds": 1.44,
+      "expected_value": -0.8884,
+      "raw_data": {
+        "source": "espn_mls_raw_odds",
+        "source_match_id": "espn-mls-event-seattle-sounders-fc-portland-timbers",
+        "manual_review": true,
+        "note": "Fill real kickoff before dry-run/apply. ESPN match_date looked like scrape time, not kickoff."
+      }
+    }
+  ]
+}
