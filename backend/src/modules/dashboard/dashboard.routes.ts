@@ -555,6 +555,95 @@ const dashboardHtml = String.raw`<!doctype html>
       if (!values.length) return "<li>" + esc(emptyText || "Sin datos") + "</li>";
       return values.map(item => "<li>" + esc(item) + "</li>").join("");
     }
+    function firstValue(...values) {
+      return values.find(value => value !== null && value !== undefined && value !== "");
+    }
+    function uniqueList(values) {
+      return Array.from(new Set((values || []).filter(Boolean)));
+    }
+    function pickNegativeReasons(pick) {
+      const status = String(pick.simple_status || pick.pick_decision_status || pick.pick_decision || "");
+      const decision = String(pick.pick_decision_status || pick.pick_decision || "");
+      const underdog = String(pick.underdog_plus_status || "");
+      const matchup = String(pick.matchup_status || "");
+      const evAudit = String(pick.high_ev_status || pick.high_ev_audit_status || "");
+      const reasons = []
+        .concat(pick.blocking_reasons || [])
+        .concat(pick.negative_reasons || []);
+      if (status.includes("MODEL_CONFLICT") || matchup.includes("MODEL_CONFLICT")) {
+        reasons.push("Conflicto de matchup: revisar contexto antes de tocar.");
+      }
+      if (decision.includes("BLOCKED") || status.includes("BLOCKED")) {
+        reasons.push("Risk Engine bloquea este pick.");
+      }
+      if (underdog.includes("BLOCKED")) {
+        reasons.push("Underdog Plus bloqueado: no promover sin revision.");
+      }
+      if (status.includes("REJECT") || decision.includes("REJECT")) {
+        reasons.push("No cumple filtros minimos.");
+      }
+      if (["ODDS_OUTLIER_REVIEW", "PROVIDER_REVIEW", "EXTREME_EV_REVIEW"].includes(evAudit)) {
+        reasons.push("EV audit " + evAudit + ": requiere revision extra.");
+      }
+      return uniqueList(reasons);
+    }
+    function bestNumeric(values, mode) {
+      const numbers = values.map(value => Number(value)).filter(value => Number.isFinite(value));
+      if (!numbers.length) return null;
+      return mode === "min" ? Math.min(...numbers) : Math.max(...numbers);
+    }
+    function groupPendingSettlementRows(rows) {
+      const groups = new Map();
+      (rows || []).forEach(row => {
+        const key = [
+          row.match_id || "",
+          row.home_team || "",
+          row.away_team || "",
+          row.market_type || row.market || "moneyline_2way",
+          row.pick || row.selection || ""
+        ].join("|");
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(row);
+      });
+      return Array.from(groups.values()).map(group => {
+        const sorted = group.slice().sort((a, b) => new Date(b.entry_timestamp || b.latest_entry || b.match_date || 0) - new Date(a.entry_timestamp || a.latest_entry || a.match_date || 0));
+        const latest = sorted[0] || {};
+        return Object.assign({}, latest, {
+          row_type: "Grupo",
+          snapshots_count: group.length,
+          latest_entry_odds: firstValue(latest.entry_odds, latest.latest_entry_odds),
+          best_entry_odds: bestNumeric(group.map(row => firstValue(row.entry_odds, row.latest_entry_odds)), "max")
+        });
+      });
+    }
+    function hasFootballMarketData(row) {
+      const dataCount = [
+        row.closed,
+        row.total,
+        row.open,
+        row.wins,
+        row.losses,
+        row.pushes,
+        row.profit,
+        row.profit_units,
+        row.market_snapshots,
+        row.shadow_candidates,
+        row.shadow_paper
+      ].map(value => Number(value || 0)).reduce((sum, value) => sum + value, 0);
+      return dataCount > 0;
+    }
+    function isEmptyGlobalFootballRow(row) {
+      const league = String(row.league_id || row.league_slug || row.league_display_name || "").toUpperCase();
+      return league === "GLOBAL" && !hasFootballMarketData(row);
+    }
+    function visibleFootballRows(rows) {
+      return (rows || []).filter(row => {
+        if (isEmptyGlobalFootballRow(row)) return false;
+        if (hasFootballMarketData(row)) return true;
+        if (row.status === "BLOCKED") return true;
+        return ["FAVORITE", "WATCH"].includes(row.tier || row.priority || "");
+      });
+    }
     function renderCommandCenter(commandCenter) {
       const cc = commandCenter || {};
       const counts = cc.counts || {};
@@ -577,12 +666,16 @@ const dashboardHtml = String.raw`<!doctype html>
       $("ccMarketHealth").textContent = (health.status || "-") + " | Closed " + (health.closed || 0) + " | CLV " + (health.average_clv === null || health.average_clv === undefined ? "-" : fmtPct(health.average_clv)) + " | Profit " + (health.profit_units ?? 0) + "u";
 
       const cards = picks.map(pick => {
-        const cls = simpleStatusClass(pick.simple_status || pick.pick_decision_status || pick.underdog_plus_status);
+        const grade = firstValue(pick.edge_quality_grade, pick.edge_grade, pick.grade, "-");
+        const decision = firstValue(pick.pick_decision_status, pick.pick_decision, pick.decision, "-");
+        const highEvAudit = firstValue(pick.high_ev_status, pick.high_ev_audit_status, "-");
+        const blockingReasons = pickNegativeReasons(pick);
+        const cls = simpleStatusClass(pick.simple_status || decision || pick.underdog_plus_status);
         return "<article class='pick-card'>" +
           "<header><span class='simple-status " + cls + "'>" + esc(pick.simple_status || "REVIEW") + "</span><strong>" + esc(pick.match) + "</strong></header>" +
-          "<div class='pick-meta'><span>Pick: <b>" + esc(pick.pick_label || pick.pick) + "</b></span><span>Odds: <b>" + esc(pick.odds) + "</b></span><span>Prob: <b>" + (pick.model_probability === null || pick.model_probability === undefined ? "-" : fmtPct(pick.model_probability)) + "</b></span><span>EV: <b>" + (pick.expected_value === null || pick.expected_value === undefined ? "-" : fmtPct(pick.expected_value)) + "</b></span><span>Grade: <b>" + esc(pick.edge_quality_grade) + "</b></span></div>" +
-          "<div class='pick-meta'><span>Decision: " + esc(pick.pick_decision_status) + "</span><span>Underdog+: " + esc(pick.underdog_plus_status) + "</span><span>Matchup: " + esc(pick.matchup_status) + "</span><span>EV audit: " + esc(pick.high_ev_status) + "</span></div>" +
-          "<div class='reason-list'><div><b>Por que interesa</b><ul>" + listItems(pick.positive_reasons, "Sin razones positivas fuertes") + "</ul></div><div><b>Por que se frena</b><ul>" + listItems(pick.blocking_reasons, "Sin bloqueos activos") + "</ul></div></div>" +
+          "<div class='pick-meta'><span>Pick: <b>" + esc(pick.pick_label || pick.pick) + "</b></span><span>Odds: <b>" + esc(pick.odds) + "</b></span><span>Prob: <b>" + (pick.model_probability === null || pick.model_probability === undefined ? "-" : fmtPct(pick.model_probability)) + "</b></span><span>EV: <b>" + (pick.expected_value === null || pick.expected_value === undefined ? "-" : fmtPct(pick.expected_value)) + "</b></span><span>Grade: <b>" + esc(grade) + "</b></span></div>" +
+          "<div class='pick-meta'><span>Decision: " + esc(decision) + "</span><span>Underdog+: " + esc(pick.underdog_plus_status) + "</span><span>Matchup: " + esc(pick.matchup_status) + "</span><span>EV audit: " + esc(highEvAudit) + "</span></div>" +
+          "<div class='reason-list'><div><b>Por que interesa</b><ul>" + listItems(pick.positive_reasons, "Sin razones positivas fuertes") + "</ul></div><div><b>Por que se frena</b><ul>" + listItems(blockingReasons, "Sin bloqueos activos") + "</ul></div></div>" +
           "<p class='muted'>" + esc(pick.recommended_action || "Revisar en Real Paper") + "</p>" +
         "</article>";
       }).join("");
@@ -592,7 +685,7 @@ const dashboardHtml = String.raw`<!doctype html>
         { label: "Match", value: r => esc(r.match) },
         { label: "Status", value: r => "<span class='simple-status " + simpleStatusClass(r.simple_status) + "'>" + esc(r.simple_status) + "</span>" },
         { label: "Por que si", value: r => (r.positive_reasons || []).map(esc).join("<br>") || "-" },
-        { label: "Por que no", value: r => (r.blocking_reasons || []).map(esc).join("<br>") || "-" },
+        { label: "Por que no", value: r => pickNegativeReasons(r).map(esc).join("<br>") || "-" },
         { label: "Accion", value: r => esc(r.recommended_action || "REVIEW_ONLY") }
       ], picks);
 
@@ -612,7 +705,7 @@ const dashboardHtml = String.raw`<!doctype html>
       const summary = data.summary || {};
       $("pendingSettlementRecommendation").textContent = data.recommendation || "Sin recomendacion.";
       const summaryRow = Object.assign({ row_type: "Resumen" }, summary);
-      const detailRows = (data.rows || []).map(row => Object.assign({ row_type: "Snapshot" }, row));
+      const detailRows = groupPendingSettlementRows(data.rows || []);
       renderTable("pendingSettlementMonitor", [
         { label: "Tipo", value: r => esc(r.row_type || "-") },
         { label: "Estado", value: r => r.settlement_state ? "<span class='badge'>" + esc(r.settlement_state) + "</span>" : esc(r.snapshot_status || "-") },
@@ -624,7 +717,9 @@ const dashboardHtml = String.raw`<!doctype html>
         { label: "Pending closing", value: r => r.pending_closing ?? "-" },
         { label: "Pending results", value: r => r.pending_results ?? "-" },
         { label: "Pick", value: r => pickLabel(r.pick) },
-        { label: "Entry", value: r => fmtOdds(r.entry_odds) },
+        { label: "Snapshots", value: r => r.snapshots_count ?? "-" },
+        { label: "Latest entry", value: r => fmtOdds(firstValue(r.latest_entry_odds, r.entry_odds)) },
+        { label: "Best entry", value: r => fmtOdds(r.best_entry_odds) },
         { label: "Closing", value: r => fmtOdds(r.closing_odds) }
       ], [summaryRow].concat(detailRows));
     }
@@ -641,6 +736,7 @@ const dashboardHtml = String.raw`<!doctype html>
       $("footballBestMarketMeta").textContent = best.closed ? ("Closed " + best.closed + " | W/L " + (best.wins || 0) + "/" + (best.losses || 0) + " | Profit " + (best.profit_units || 0) + "u") : "Esperando muestra cerrada.";
       $("footballAction").textContent = data.blocked_markets?.length ? "REVIEW_BLOCKS" : "ACCUMULATE";
       $("footballNextGoal").textContent = data.recommended_action || data.next_goal || "Acumular muestra por liga y mercado.";
+      const footballCommandRows = visibleFootballRows(data.league_market_performance || []);
       renderTable("footballCommandTable", [
         { label: "Liga", value: r => esc(r.league_display_name || r.league_id || "-") },
         { label: "Prioridad", value: r => r.priority === "FAVORITE" ? "<span class='value'>FAVORITE</span>" : "<span class='badge'>" + esc(r.priority || "-") + "</span>" },
@@ -653,7 +749,7 @@ const dashboardHtml = String.raw`<!doctype html>
         { label: "CLV", value: r => r.avg_clv === null || r.avg_clv === undefined ? "-" : fmtPct(r.avg_clv) },
         { label: "Estado", value: r => r.status === "READY_FOR_REVIEW" ? "<span class='value'>READY_FOR_REVIEW</span>" : (r.status === "BLOCKED" ? "<span class='loss'>BLOCKED</span>" : "<span class='warn'>" + esc(r.status || "-") + "</span>") },
         { label: "Recomendacion", value: r => esc(r.recommendation || "-") }
-      ], data.league_market_performance || []);
+      ], footballCommandRows);
     }
     function renderFootballTodayUniverse(data) {
       data = data || {};
@@ -686,6 +782,7 @@ const dashboardHtml = String.raw`<!doctype html>
     function renderFootballMarketLab(footballMarketLab) {
       const data = footballMarketLab || {};
       $("footballMarketLabRecommendation").textContent = data.recommendation || "Alimentar ligas favoritas en Shadow Paper.";
+      const footballMarketRows = visibleFootballRows(data.visible_rows || data.rows || []);
       renderTable("footballMarketLabTable", [
         { label: "Liga", value: r => esc(r.league_display_name || r.league_id || "-") },
         { label: "Tier", value: r => r.tier === "FAVORITE" ? "<span class='value'>FAVORITE</span>" : "<span class='badge'>" + esc(r.tier || "-") + "</span>" },
@@ -701,7 +798,7 @@ const dashboardHtml = String.raw`<!doctype html>
         { label: "Progreso 50", value: r => fmtPct(r.sample_progress_to_50 || 0) },
         { label: "Progreso 75", value: r => fmtPct(r.sample_progress_to_75 || 0) },
         { label: "Recomendacion", value: r => esc(r.recommendation || "-") }
-      ], data.visible_rows || data.rows || []);
+      ], footballMarketRows);
     }
     function renderFootballPendingSettlementMonitor(data) {
       data = data || {};
