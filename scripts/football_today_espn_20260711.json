@@ -1,0 +1,278 @@
+{
+  "date": "2026-07-11",
+  "source": "espn_mobile_calendar_screenshot",
+  "fixtures": [
+    {
+      "league": "fifa-world-cup-2026",
+      "home_team": "NOR",
+      "away_team": "ENG",
+      "kickoff": "2026-07-11T16:00:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "Copa Mundial FIFA",
+        "venue_hint": "Hard Rock Stadium, Miami",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "fifa-world-cup-2026",
+      "home_team": "ARG",
+      "away_team": "SUI",
+      "kickoff": "2026-07-11T20:00:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "Copa Mundial FIFA",
+        "venue_hint": "GEHA Field at Arrowhead",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "nwsl",
+      "home_team": "NC",
+      "away_team": "WAS",
+      "kickoff": "2026-07-11T17:30:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "NWSL",
+        "venue_hint": "WakeMed Soccer Park",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "nwsl",
+      "home_team": "SD",
+      "away_team": "LA",
+      "kickoff": "2026-07-11T19:45:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "NWSL",
+        "venue_hint": "Snapdragon Stadium",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "amistoso",
+      "home_team": "FEN",
+      "away_team": "POG",
+      "kickoff": "2026-07-11T12:30:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "Amistoso",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "campeonato uruguayo",
+      "home_team": "DAN",
+      "away_team": "NAC",
+      "kickoff": "2026-07-11T13:00:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "Campeonato Uruguayo",
+        "venue_hint": "Jardines del Hipodromo",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "campeonato uruguayo",
+      "home_team": "WAN",
+      "away_team": "PSO",
+      "kickoff": "2026-07-11T16:00:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "Campeonato Uruguayo",
+        "venue_hint": "Parque Alfredo Victor Viera",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "ligapro ecuador",
+      "home_team": "MAN",
+      "away_team": "ORS",
+      "kickoff": "2026-07-11T12:00:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "LigaPro de Ecuador",
+        "venue_hint": "Estadio Jocay",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "ligapro ecuador",
+      "home_team": "MUS",
+      "away_team": "IDV",
+      "kickoff": "2026-07-11T14:10:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "LigaPro de Ecuador",
+        "venue_hint": "Estadio COAC Mushuc Runa",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "ligapro ecuador",
+      "home_team": "GCF",
+      "away_team": "DEL",
+      "kickoff": "2026-07-11T18:00:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "LigaPro de Ecuador",
+        "venue_hint": "Estadio Christian Benitez",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "liga profesional boliviana",
+      "home_team": "ORU",
+      "away_team": "GVSJ",
+      "kickoff": "2026-07-11T14:00:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "Liga Profesional Boliviana",
+        "venue_hint": "Estadio Jesus Bermudez",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "campeonato europeo sub-19",
+      "home_team": "ESP",
+      "away_team": "GER",
+      "kickoff": "2026-07-11T13:00:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "Campeonato europeo sub-19",
+        "venue_hint": "STOK Cae Ras, Wrexham",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "primera nacional argentina",
+      "home_team": "ALLB",
+      "away_team": "Alte Brown",
+      "kickoff": "2026-07-11T13:00:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "Primera Nacional de Argentina",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "primera nacional argentina",
+      "home_team": "RAF",
+      "away_team": "CDM",
+      "kickoff": "2026-07-11T13:00:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "Primera Nacional de Argentina",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "primera nacional argentina",
+      "home_team": "MOR",
+      "away_team": "DMA",
+      "kickoff": "2026-07-11T13:00:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "Primera Nacional de Argentina",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "primera nacional argentina",
+      "home_team": "EST",
+      "away_team": "MIT",
+      "kickoff": "2026-07-11T13:00:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "Primera Nacional de Argentina",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "primera nacional argentina",
+      "home_team": "Los Andes",
+      "away_team": "CDB",
+      "kickoff": "2026-07-11T13:00:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "Primera Nacional de Argentina",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "primera nacional argentina",
+      "home_team": "SAN",
+      "away_team": "FCO",
+      "kickoff": "2026-07-11T13:00:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "Primera Nacional de Argentina",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "primera nacional argentina",
+      "home_team": "SAN",
+      "away_team": "CFE",
+      "kickoff": "2026-07-11T13:00:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "Primera Nacional de Argentina",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    },
+    {
+      "league": "primera nacional argentina",
+      "home_team": "TRI",
+      "away_team": "NCHI",
+      "kickoff": "2026-07-11T13:00:00-05:00",
+      "status": "scheduled",
+      "source": "espn_mobile_calendar_screenshot",
+      "raw_data": {
+        "espn_section": "Primera Nacional de Argentina",
+        "observation_only": true,
+        "feed_status": "OBSERVATION_ONLY"
+      }
+    }
+  ],
+  "signals": []
+}
