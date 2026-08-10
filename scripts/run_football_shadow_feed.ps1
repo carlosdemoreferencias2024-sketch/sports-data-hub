@@ -23,7 +23,7 @@ function Test-AllowedMarket {
   param($Signal)
 
   $market = [string]$Signal.market
-  $allowed = @("moneyline_3way", "total_goals_2_5", "draw_no_bet")
+  $allowed = @("moneyline_3way", "total_goals_2_5", "draw_no_bet", "double_chance")
   if ($allowed -contains $market) {
     return
   }
@@ -41,6 +41,20 @@ function Test-AllowedMarket {
   }
 
   throw "Mercado no permitido para carga inicial de futbol: $market"
+}
+
+function Test-ValidSelectionForMarket {
+  param([string]$Market, [string]$Selection)
+
+  $value = $Selection.ToLowerInvariant()
+  switch ($Market) {
+    "moneyline_3way" { return @("home", "away", "draw") -contains $value }
+    "total_goals_2_5" { return @("over", "under", "over_2_5", "under_2_5") -contains $value }
+    "draw_no_bet" { return @("home", "away", "home_dnb", "away_dnb") -contains $value }
+    "double_chance" { return @("home_draw", "home_or_draw", "1x", "home_away", "home_or_away", "12", "draw_away", "draw_or_away", "x2") -contains $value }
+    "btts" { return @("yes", "no", "btts_yes", "btts_no", "si") -contains $value }
+    default { return $false }
+  }
 }
 
 function Get-LineFreshnessLabel {
@@ -79,6 +93,9 @@ function Normalize-Signal {
   }
 
   Test-AllowedMarket -Signal $Signal
+  if (-not (Test-ValidSelectionForMarket -Market ([string]$Signal.market) -Selection ([string]$Signal.selection))) {
+    throw "Seleccion invalida para mercado $($Signal.market): $($Signal.selection)"
+  }
 
   $league = [string]$Signal.league
   $provider = if (Test-HasProperty $Signal "provider") { [string]$Signal.provider } else { "manual_shadow_football" }

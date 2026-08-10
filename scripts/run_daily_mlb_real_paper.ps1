@@ -53,7 +53,7 @@ try {
     "-SportsDataIoApiKey", $SportsDataIoApiKey,
     "-Date", $dateIso
   )
-  if ($ClosingOnly) { $quoteArgs += "-ClosingOnly" }
+  if ($ClosingOnly) { $quoteArgs += @("-ClosingOnly", "-AllowQuotaSkip") }
   if ($DryRun) { $quoteArgs += "-DryRun" }
 
   Invoke-Step "cargar SportsDataIO MLB Moneyline $dateIso" {

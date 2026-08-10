@@ -22,6 +22,37 @@ type LiveLifecycleAction = {
   match: BatchMatchInput;
 };
 
+type KnownTeamAliasFix = {
+  sourceSlug: string;
+  normalizedAliases: string[];
+  leagueSlug: string;
+  teamSlug: string;
+  name: string;
+  shortName: string;
+  abbreviation: string;
+};
+
+const KNOWN_TEAM_ALIAS_FIXES: KnownTeamAliasFix[] = [
+  {
+    sourceSlug: "espn-la-liga",
+    normalizedAliases: ["alaves", "deportivo alaves"],
+    leagueSlug: "la-liga",
+    teamSlug: "deportivo-alaves",
+    name: "Deportivo Alaves",
+    shortName: "Alaves",
+    abbreviation: "ALA"
+  },
+  {
+    sourceSlug: "espn-la-liga",
+    normalizedAliases: ["rayo vallecano", "rayo", "rayo v", "vallecano"],
+    leagueSlug: "la-liga",
+    teamSlug: "rayo-vallecano",
+    name: "Rayo Vallecano",
+    shortName: "Rayo",
+    abbreviation: "RAY"
+  }
+];
+
 export class IngestionService {
   private readonly paperTrades = new PaperTradeService();
   private readonly snapshots = new SnapshotService();
@@ -159,6 +190,36 @@ export class IngestionService {
             [sourceId, matchId, match.source_match_id, match.raw_data ?? match]
           );
 
+          if (match.source_match_id.startsWith("mlb-statsapi-")) {
+            await client.query(
+              `
+                INSERT INTO provider_event_mappings (
+                  hub_match_id, provider_name, provider_event_id,
+                  home_team_name, away_team_name, kickoff,
+                  is_active, last_verified, raw_data
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, TRUE, NOW(), $7)
+                ON CONFLICT (provider_name, provider_event_id) DO UPDATE SET
+                  hub_match_id = EXCLUDED.hub_match_id,
+                  home_team_name = EXCLUDED.home_team_name,
+                  away_team_name = EXCLUDED.away_team_name,
+                  kickoff = EXCLUDED.kickoff,
+                  is_active = TRUE,
+                  last_verified = NOW(),
+                  raw_data = EXCLUDED.raw_data;
+              `,
+              [
+                matchId,
+                "mlb_stats_api",
+                match.source_match_id,
+                match.home_alias,
+                match.away_alias,
+                match.match_date,
+                match.raw_data ?? match
+              ]
+            );
+          }
+
           liveActions.push({ matchId, match });
         } catch (error) {
           result.errors += 1;
@@ -280,6 +341,7 @@ export class IngestionService {
   }
 
   private async resolveTeamId(client: { query: typeof db.query }, sourceSlug: string, alias: string) {
+    const normalizedAlias = normalizeAlias(alias);
     const team = await client.query(
       `
         SELECT sta.team_id
@@ -287,14 +349,66 @@ export class IngestionService {
         JOIN data_sources ds ON ds.id = sta.source_id
         WHERE ds.slug = $1 AND sta.normalized_alias = $2;
       `,
-      [sourceSlug, normalizeAlias(alias)]
+      [sourceSlug, normalizedAlias]
     );
 
     if (!team.rows[0]) {
+      const repairedTeamId = await this.ensureKnownTeamAlias(client, sourceSlug, alias, normalizedAlias);
+      if (repairedTeamId) return repairedTeamId;
       throw new Error(`Alias no reconocido: ${alias}`);
     }
 
     return team.rows[0].team_id as string;
+  }
+
+  private async ensureKnownTeamAlias(client: { query: typeof db.query }, sourceSlug: string, alias: string, normalizedAlias: string) {
+    const fix = KNOWN_TEAM_ALIAS_FIXES.find((item) => item.sourceSlug === sourceSlug && item.normalizedAliases.includes(normalizedAlias));
+    if (!fix) return null;
+
+    const team = await client.query(
+      `
+        INSERT INTO teams (league_id, slug, name, short_name, abbreviation, raw_data)
+        SELECT l.id, $2, $3, $4, $5, $6::jsonb
+        FROM leagues l
+        WHERE l.slug = $1
+        ON CONFLICT (slug) DO UPDATE SET
+          name = EXCLUDED.name,
+          short_name = EXCLUDED.short_name,
+          abbreviation = EXCLUDED.abbreviation,
+          raw_data = COALESCE(teams.raw_data, '{}'::jsonb) || EXCLUDED.raw_data,
+          updated_at = now()
+        RETURNING id;
+      `,
+      [
+        fix.leagueSlug,
+        fix.teamSlug,
+        fix.name,
+        fix.shortName,
+        fix.abbreviation,
+        {
+          source: "known_team_alias_fix",
+          source_slug: sourceSlug,
+          aliases: fix.normalizedAliases
+        }
+      ]
+    );
+    const teamId = team.rows[0]?.id as string | undefined;
+    if (!teamId) return null;
+
+    await client.query(
+      `
+        INSERT INTO source_team_aliases (source_id, team_id, alias, normalized_alias)
+        SELECT ds.id, $2, $3, $4
+        FROM data_sources ds
+        WHERE ds.slug = $1
+        ON CONFLICT (source_id, normalized_alias) DO UPDATE SET
+          team_id = EXCLUDED.team_id,
+          alias = EXCLUDED.alias;
+      `,
+      [sourceSlug, teamId, alias, normalizedAlias]
+    );
+
+    return teamId;
   }
 
   private async getMatchSlug(client: { query: typeof db.query }, matchId: string) {

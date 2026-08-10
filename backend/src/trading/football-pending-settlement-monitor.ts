@@ -13,12 +13,21 @@ export async function getFootballPendingSettlementMonitor(db: Queryable) {
         COUNT(*) FILTER (
           WHERE status IN ('PENDING', 'OPEN', 'PENDING_RESULT', 'PENDING_RESULTS')
             AND raw_data ? 'closing_odds'
+            AND raw_data->>'closing_quality' = 'CAPTURED_ON_TIME'
             AND raw_data ? 'home_score'
         )::int AS finished_ready_for_settle,
         COUNT(*) FILTER (
           WHERE status IN ('PENDING', 'OPEN', 'PENDING_RESULT', 'PENDING_RESULTS')
-            AND NOT (raw_data ? 'closing_odds')
+            AND (
+              NOT (raw_data ? 'closing_odds')
+              OR raw_data->>'closing_quality' IS DISTINCT FROM 'CAPTURED_ON_TIME'
+            )
         )::int AS missing_closing,
+        COUNT(*) FILTER (
+          WHERE status IN ('PENDING', 'OPEN', 'PENDING_RESULT', 'PENDING_RESULTS')
+            AND raw_data ? 'closing_odds'
+            AND raw_data->>'closing_quality' IS DISTINCT FROM 'CAPTURED_ON_TIME'
+        )::int AS closing_quality_review,
         COUNT(*) FILTER (
           WHERE status IN ('PENDING', 'OPEN', 'PENDING_RESULT', 'PENDING_RESULTS')
             AND NOT (raw_data ? 'home_score')
@@ -73,12 +82,12 @@ export async function getFootballPendingSettlementMonitor(db: Queryable) {
   const missingClosing = Number(row.missing_closing ?? 0);
   const missingResult = Number(row.missing_result ?? 0);
   const recommendation = ready > 0
-    ? "listo para settlement"
-    : missingResult > 0
-      ? "cargar resultado"
-      : missingClosing > 0
-        ? "cargar closing odds"
-        : "no hay pendientes liquidables";
+    ? "Listo para settlement: ya hay closing valido y resultado."
+    : missingClosing > 0
+      ? "Capturar closing valido primero."
+      : missingResult > 0
+        ? "Cargar resultado final verificado."
+        : "No hay pendientes liquidables.";
 
   return {
     system_status: "FOOTBALL_PENDING_SETTLEMENT_MONITOR",
@@ -88,10 +97,11 @@ export async function getFootballPendingSettlementMonitor(db: Queryable) {
     telegram_auto_enabled: false,
     real_candidate_count: 0,
     ...row,
+    ready_for_settlement: ready,
+    missing_closing_strict: missingClosing,
     by_league: byLeague.rows,
     by_market: byMarket.rows,
     examples: examples.rows,
     recommendation
   };
 }
-

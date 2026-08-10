@@ -1,7 +1,7 @@
 ﻿export type FootballLeagueTier = "FAVORITE" | "WATCH" | "GLOBAL" | "MANUAL_ONLY" | "DISABLED";
 export type FootballLeaguePriority = FootballLeagueTier;
 export type FootballFlow = "shadow_paper" | "real_paper" | "radar_only";
-export type FootballMarketKey = "moneyline_3way" | "total_goals_2_5" | "draw_no_bet" | "btts";
+export type FootballMarketKey = "moneyline_3way" | "total_goals_2_5" | "draw_no_bet" | "double_chance" | "btts";
 
 export interface FootballLeagueConfig {
   league_id: string;
@@ -28,6 +28,7 @@ export const FOOTBALL_STANDARD_MARKETS: FootballMarketKey[] = [
   "moneyline_3way",
   "total_goals_2_5",
   "draw_no_bet",
+  "double_chance",
   "btts"
 ];
 
@@ -84,6 +85,7 @@ export const FOOTBALL_LEAGUES: FootballLeagueConfig[] = [
   league({ league_id: "conference-league", display_name: "Conference League", country_or_region: "Europe", confederation: "UEFA", tier: "WATCH", priority_score: 74 }),
   league({ league_id: "concacaf-champions-cup", display_name: "Concacaf Champions Cup", country_or_region: "North America", confederation: "CONCACAF", tier: "WATCH", priority_score: 79 }),
   league({ league_id: "fa-cup", display_name: "FA Cup", country_or_region: "England", confederation: "UEFA", tier: "WATCH", priority_score: 76 }),
+  league({ league_id: "england-league-cup", display_name: "EFL League Cup", country_or_region: "England", confederation: "UEFA", tier: "WATCH", priority_score: 74 }),
   league({ league_id: "copa-del-rey", display_name: "Copa del Rey", country_or_region: "Spain", confederation: "UEFA", tier: "WATCH", priority_score: 75 }),
   league({ league_id: "coppa-italia", display_name: "Coppa Italia", country_or_region: "Italy", confederation: "UEFA", tier: "WATCH", priority_score: 73 }),
   league({ league_id: "dfb-pokal", display_name: "DFB-Pokal", country_or_region: "Germany", confederation: "UEFA", tier: "WATCH", priority_score: 72 }),

@@ -1,5 +1,12 @@
 ﻿import { FOOTBALL_LEAGUES, FOOTBALL_STANDARD_MARKETS, FootballLeagueConfig, FootballMarketKey } from "./football-leagues.config.js";
 import { resolveFootballLeagueId } from "./football-league-aliases.js";
+import {
+  competitionToLeagueConfig,
+  getCompetitionByLeagueIdFromRows,
+  getCompetitionRows,
+  getMarketBlockReasonForCompetition,
+  isMarketEnabledForCompetitionRow
+} from "./football-competition-registry.js";
 
 export type FootballLabStatus = "ACCUMULATING_EARLY" | "ACCUMULATING" | "WATCH" | "READY_FOR_REVIEW" | "COOLING" | "BLOCKED" | "DISABLED";
 
@@ -66,14 +73,23 @@ type FootballFeedRow = {
   flow?: "shadow_paper" | "observation_only";
 };
 
-function hasOneFootballConsensus(rawData?: Record<string, unknown>): boolean {
+function hasTrustedSourceConsensus(rawData?: Record<string, unknown>): boolean {
   const consensus = String(rawData?.source_consensus ?? "").toLowerCase();
-  return consensus.includes("onefootball");
+  if (consensus.includes("onefootball")) return true;
+
+  const verified = rawData?.consensus_verified === true;
+  const evidenceUrl = String(rawData?.consensus_evidence_url ?? rawData?.official_source_url ?? "").trim();
+  const hasOfficialSource = consensus.includes("official")
+    || consensus.includes("mls")
+    || consensus.includes("league_source");
+
+  return verified && evidenceUrl !== "" && hasOfficialSource;
 }
 
 function getFixtureTrustBlockReason(signal: FootballSignalInput, dryRun: boolean): string | null {
   const rawData = signal.raw_data ?? {};
   const validationStatus = String(rawData.validation_status ?? "").toUpperCase();
+  const observationOnly = isObservationOnly(signal);
 
   if (rawData.kickoff_trusted === false || validationStatus === "KICKOFF_UNTRUSTED") {
     return "KICKOFF_UNTRUSTED";
@@ -87,11 +103,15 @@ function getFixtureTrustBlockReason(signal: FootballSignalInput, dryRun: boolean
     return validationStatus;
   }
 
-  if (!dryRun) {
+  if (!observationOnly && rawData.requires_onefootball_consensus === true && !hasTrustedSourceConsensus(rawData)) {
+    return "SOURCE_CONSENSUS_REQUIRED";
+  }
+
+  if (!dryRun && !observationOnly) {
     if (rawData.kickoff_trusted !== true) {
       return "KICKOFF_UNTRUSTED";
     }
-    if (!hasOneFootballConsensus(rawData)) {
+    if (!hasTrustedSourceConsensus(rawData)) {
       return "SOURCE_CONSENSUS_REQUIRED";
     }
   }
@@ -105,11 +125,14 @@ function isObservationOnly(signal: FootballSignalInput): boolean {
     || String(rawData.feed_status ?? rawData.status ?? "").toUpperCase() === "OBSERVATION_ONLY";
 }
 
-function normalizeSnapshotSelection(selection: string): "home" | "away" | "draw" | "over" | "under" | "yes" | "no" | null {
+function normalizeSnapshotSelection(selection: string): "home" | "away" | "draw" | "over" | "under" | "yes" | "no" | "home_draw" | "home_away" | "draw_away" | null {
   const normalized = selection.toLowerCase();
   if (["home", "home_dnb", "local"].includes(normalized)) return "home";
   if (["away", "away_dnb", "visitor", "visitante"].includes(normalized)) return "away";
   if (["draw", "tie", "empate"].includes(normalized)) return "draw";
+  if (["home_draw", "home_or_draw", "1x"].includes(normalized)) return "home_draw";
+  if (["home_away", "home_or_away", "12"].includes(normalized)) return "home_away";
+  if (["draw_away", "draw_or_away", "x2"].includes(normalized)) return "draw_away";
   if (normalized.startsWith("over")) return "over";
   if (normalized.startsWith("under")) return "under";
   if (["yes", "btts_yes", "si"].includes(normalized)) return "yes";
@@ -117,11 +140,11 @@ function normalizeSnapshotSelection(selection: string): "home" | "away" | "draw"
   return null;
 }
 
-function quoteOddsColumns(selection: "home" | "away" | "draw" | "over" | "under" | "yes" | "no", odds: number) {
+function quoteOddsColumns(selection: "home" | "away" | "draw" | "over" | "under" | "yes" | "no" | "home_draw" | "home_away" | "draw_away", odds: number) {
   return {
-    home_odds: selection === "home" || selection === "over" || selection === "yes" ? odds : null,
-    away_odds: selection === "away" || selection === "under" || selection === "no" ? odds : null,
-    draw_odds: selection === "draw" ? odds : null
+    home_odds: selection === "home" || selection === "over" || selection === "yes" || selection === "home_draw" ? odds : null,
+    away_odds: selection === "away" || selection === "under" || selection === "no" || selection === "draw_away" ? odds : null,
+    draw_odds: selection === "draw" || selection === "home_away" ? odds : null
   };
 }
 
@@ -134,6 +157,11 @@ function toNullableNumber(value: unknown): number | null {
   if (value === null || value === undefined) return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeOddsSource(value?: string): string {
+  const source = (value ?? "manual_shadow").trim() || "manual_shadow";
+  return source.length <= 30 ? source : source.slice(0, 30);
 }
 
 function getLeague(leagueId: string) {
@@ -165,7 +193,9 @@ function recommendationFor(status: FootballLabStatus, row: Pick<FootballMarketLa
 }
 
 export async function getFootballMarketLab(db: Queryable) {
-  const leagueIds = FOOTBALL_LEAGUES.map((league) => league.league_id);
+  const registryRows = await getCompetitionRows(db);
+  const activeLeagues = registryRows.length ? registryRows.map(competitionToLeagueConfig) : FOOTBALL_LEAGUES;
+  const leagueIds = activeLeagues.map((league) => league.league_id);
   const result = await db.query(
     `
       SELECT
@@ -197,7 +227,7 @@ export async function getFootballMarketLab(db: Queryable) {
   }
 
   const rows: FootballMarketLabRow[] = [];
-  for (const league of FOOTBALL_LEAGUES) {
+  for (const league of activeLeagues) {
     for (const market of league.markets_enabled) {
       const raw = metricsByKey.get(`${league.league_id}:${market}`);
       const wins = toNumber(raw?.wins);
@@ -259,7 +289,7 @@ export async function getFootballMarketLab(db: Queryable) {
     worst_current_market: worst,
     blocked_markets: rows.filter((row) => row.status === "BLOCKED"),
     global_leagues_collapsed: collapsedGlobal.map((row) => row.league_id + ":" + row.market),
-    favorite_leagues_without_data: FOOTBALL_LEAGUES.filter((league) => league.priority === "FAVORITE" && rows.every((row) => row.league_id !== league.league_id || row.total === 0)).map((league) => league.league_id),
+    favorite_leagues_without_data: activeLeagues.filter((league) => league.priority === "FAVORITE" && rows.every((row) => row.league_id !== league.league_id || row.total === 0)).map((league) => league.league_id),
     next_closest_to_50: closestTo50,
     recommendation: closestTo50 ? `Siguiente meta: ${closestTo50.league_display_name} ${closestTo50.market} va ${closestTo50.closed}/50.` : "Alimentar ligas FAVORITE y WATCH; GLOBAL queda colapsado hasta tener datos.",
     guardrails: {
@@ -397,6 +427,7 @@ export async function getFootballShadowFeedStatus(db: Queryable) {
 export async function processFootballShadowFeed(db: Queryable, body: { dry_run?: boolean; signals?: FootballSignalInput[] }) {
   const dryRun = body.dry_run !== false;
   const signals = body.signals ?? [];
+  const registryRows = await getCompetitionRows(db);
   const summary = { inserted: 0, observed: 0, would_insert: 0, would_observe: 0, skipped: 0, blocked: 0, duplicates: 0, dry_run: dryRun };
   const rows: FootballFeedRow[] = [];
 
@@ -408,17 +439,24 @@ export async function processFootballShadowFeed(db: Queryable, body: { dry_run?:
       rows.push({ league_id: leagueId || null, league_name: null, market: signal.market, dry_run: dryRun, status: "SKIPPED", reason: "league_not_enabled" });
       continue;
     }
-    if (league.tier === "MANUAL_ONLY" && !(signal.provider ?? "manual_shadow").includes("manual_shadow")) {
+    const isManualReview = signal.raw_data?.manual_review === true || signal.raw_data?.manual_review_required === true;
+    const competition = getCompetitionByLeagueIdFromRows(leagueId, registryRows);
+    const registryBlock = getMarketBlockReasonForCompetition(competition, signal.market, isManualReview);
+    if (registryBlock) {
+      summary.skipped += 1;
+      rows.push({ league_id: leagueId, league_name: league.display_name, market: signal.market, dry_run: dryRun, status: "SKIPPED", reason: registryBlock });
+      continue;
+    }
+    if (league.tier === "MANUAL_ONLY" && !(signal.provider ?? "manual_shadow").includes("manual_shadow") && !isManualReview) {
       summary.skipped += 1;
       rows.push({ league_id: leagueId, league_name: league.display_name, market: signal.market, dry_run: dryRun, status: "SKIPPED", reason: "manual_only_requires_manual_shadow" });
       continue;
     }
-    if (!league.markets_enabled.includes(signal.market)) {
+    if (!isMarketEnabledForCompetitionRow(competition, signal.market, isManualReview) && !league.markets_enabled.includes(signal.market)) {
       summary.skipped += 1;
-      rows.push({ league_id: leagueId, league_name: league.display_name, market: signal.market, dry_run: dryRun, status: "SKIPPED", reason: "market_not_enabled" });
+      rows.push({ league_id: leagueId, league_name: league.display_name, market: signal.market, dry_run: dryRun, status: "SKIPPED", reason: "MARKET_NOT_ENABLED" });
       continue;
     }
-    const isManualReview = signal.raw_data?.manual_review === true || signal.raw_data?.manual_review_required === true;
     if (signal.market === "btts" && !dryRun && !isManualReview) {
       summary.skipped += 1;
       rows.push({ league_id: leagueId, league_name: league.display_name, market: signal.market, dry_run: dryRun, status: "SKIPPED", reason: "btts_requires_manual_review" });
@@ -580,6 +618,16 @@ export async function processFootballShadowFeed(db: Queryable, body: { dry_run?:
       continue;
     }
 
+    const providerName = signal.provider ?? "manual_shadow";
+    const oddsSource = normalizeOddsSource(providerName);
+    const rawData = JSON.stringify({
+      ...(signal.raw_data ?? {}),
+      processed: true,
+      flow: "shadow_paper",
+      full_provider_name: providerName,
+      odds_source_normalized: oddsSource
+    });
+
     const insert = await db.query(
       `
         INSERT INTO paper_trades (
@@ -599,12 +647,12 @@ export async function processFootballShadowFeed(db: Queryable, body: { dry_run?:
         signal.market,
         signal.selection,
         modelVersion,
-        signal.provider ?? "manual_shadow",
+        oddsSource,
         signal.model_probability,
         signal.market_odds,
         signal.expected_value,
         signal.bankroll_allocation ?? 0.01,
-        JSON.stringify({ ...(signal.raw_data ?? {}), processed: true, flow: "shadow_paper" })
+        rawData
       ]
     );
     if (insert.rows.length === 0) {

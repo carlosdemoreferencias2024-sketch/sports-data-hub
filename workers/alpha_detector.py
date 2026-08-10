@@ -1,9 +1,11 @@
 import argparse
 import json
 import os
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import psycopg
+from market_integrity_policy import validate_entry_snapshot
 from pre_bet_validator import validate_market_quote, validate_mlb_fixture
 
 
@@ -74,6 +76,31 @@ def _is_manual_or_shadow_provider(provider_name: str | None) -> bool:
     return "manual" in provider or "shadow" in provider or "simulated" in provider
 
 
+def _parse_utc(value) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw = str(value).strip()
+        if not raw:
+            return None
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _entry_after_first_pitch(row: dict) -> bool:
+    kickoff = _parse_utc(row.get("official_kickoff"))
+    captured_at = _parse_utc(row.get("captured_at"))
+    if not kickoff or not captured_at:
+        return False
+    return captured_at >= kickoff
+
+
 def _is_real_paper_candidate(row: dict, selection: dict) -> bool:
     if os.getenv("ENABLE_REAL_PAPER", "true").lower() == "false":
         return False
@@ -81,13 +108,29 @@ def _is_real_paper_candidate(row: dict, selection: dict) -> bool:
         return False
     if row.get("quote_processed") is not True:
         return False
+    if str(row.get("status") or "").strip() != "scheduled":
+        return False
     if not str(row.get("bookmaker") or "").strip():
         return False
     if row["sport_slug"] != "baseball" or row["league_slug"] != "mlb":
         return False
     if row["market_type"] != "moneyline_2way":
         return False
-    if _is_manual_or_shadow_provider(row["provider_name"]):
+    entry_integrity = validate_entry_snapshot(
+        {
+            "captured_at": row.get("captured_at"),
+            "kickoff": row.get("official_kickoff"),
+            "source_name": row.get("source_name") or row.get("provider_name"),
+            "evidence_id": row.get("evidence_id"),
+            "screenshot_sha256": row.get("screenshot_sha256"),
+            "snapshot_type": row.get("snapshot_type"),
+            "stale_status": row.get("stale_status"),
+            "safe_for_entry": row.get("safe_for_entry"),
+            "canonical_match": row.get("canonical_match"),
+            "duplicate": row.get("duplicate"),
+        }
+    )
+    if not entry_integrity["eligible"]:
         return False
     odds = float(selection["market_odds"])
     probability = float(selection["probability"])
@@ -113,8 +156,36 @@ def _create_real_paper_snapshot(conn, row: dict, selection: dict, stake_fraction
           %s, %s, %s, %s,
           %s, %s, %s, %s::jsonb
         )
-        ON CONFLICT DO NOTHING
-        RETURNING id;
+        ON CONFLICT (
+          match_id,
+          model_name,
+          market_type,
+          COALESCE(line, -9999::numeric),
+          pick
+        )
+        WHERE status IN ('OPEN', 'PENDING_CLOSING', 'PENDING_RESULT', 'PENDING_RESULTS')
+          AND duplicate_of_id IS NULL
+          AND COALESCE(data_state, 'FRESH') <> 'DUPLICATE'
+        DO UPDATE SET
+          market_quote_id = EXCLUDED.market_quote_id,
+          model_quote_id = EXCLUDED.model_quote_id,
+          data_state = 'FRESH',
+          archived_at = NULL,
+          archive_reason = NULL,
+          last_refreshed_at = GREATEST(
+            COALESCE(real_paper_snapshots.last_refreshed_at, real_paper_snapshots.entry_timestamp),
+            EXCLUDED.entry_timestamp
+          ),
+          raw_data = real_paper_snapshots.raw_data || jsonb_build_object(
+            'last_seen_market_quote_id', EXCLUDED.market_quote_id,
+            'last_seen_model_quote_id', EXCLUDED.model_quote_id,
+            'last_seen_entry_odds', EXCLUDED.entry_odds,
+            'last_seen_model_probability', EXCLUDED.model_probability,
+            'last_seen_expected_value', EXCLUDED.expected_value,
+            'dedupe_guard', 'open_exposure_upsert_v1'
+          ),
+          updated_at = NOW()
+        RETURNING id, (xmax = 0) AS inserted;
         """,
         (
             row["match_id"],
@@ -141,11 +212,20 @@ def _create_real_paper_snapshot(conn, row: dict, selection: dict, stake_fraction
                     "away_team_name": row.get("away_team_name"),
                     "flat_only": True,
                     "kelly_enabled": False,
+                    "entry_integrity": "ENTRY_VALID",
+                    "entry_snapshot_id": row.get("entry_snapshot_id"),
+                    "entry_evidence_id": row.get("evidence_id"),
+                    "entry_screenshot_sha256": row.get("screenshot_sha256"),
+                    "entry_source_name": row.get("source_name") or row.get("provider_name"),
+                    "canonical_match": True,
+                    "duplicate_exposure": False,
+                    "clean_chain_version": "v2",
                 }
             ),
         ),
     )
-    return bool(result.rowcount)
+    returned = result.fetchone()
+    return bool(returned and returned.get("inserted"))
 
 
 def _create_paper_trade(conn, row: dict, selection: dict, stake_fraction: float) -> bool:
@@ -245,6 +325,15 @@ def detect_alpha(
                 ARRAY_AGG(DISTINCT flag) FILTER (WHERE flag IS NOT NULL) AS quality_flags,
                 MAX(COALESCE(NULLIF(os.bookmaker, ''), NULLIF(os.raw_data->>'bookmaker', ''), os.provider_name)) AS bookmaker,
                 BOOL_OR(COALESCE((os.raw_data->>'processed')::boolean, false)) AS quote_processed,
+                MAX(os.id::text) AS entry_snapshot_id,
+                MAX(COALESCE(NULLIF(os.raw_data->>'source_name', ''), os.provider_name)) AS source_name,
+                MAX(NULLIF(os.raw_data->>'evidence_id', '')) AS evidence_id,
+                MAX(NULLIF(os.raw_data->>'screenshot_sha256', '')) AS screenshot_sha256,
+                BOOL_OR(COALESCE((os.raw_data->>'safe_for_entry')::boolean, false)) AS safe_for_entry,
+                BOOL_OR(COALESCE((os.raw_data->>'canonical_match')::boolean, false)) AS canonical_match,
+                BOOL_OR(COALESCE((os.raw_data->>'duplicate')::boolean, false)) AS duplicate,
+                MAX(COALESCE(NULLIF(os.raw_data->>'snapshot_type', ''), os.snapshot_role)) AS snapshot_type,
+                MAX(COALESCE(NULLIF(os.raw_data->>'stale_status', ''), 'UNKNOWN')) AS stale_status,
                 JSONB_OBJECT_AGG(os.selection, os.odds) AS selection_odds,
                 MAX(os.odds) FILTER (WHERE os.selection IN ('home', 'over', 'yes')) AS home_odds,
                 MAX(os.odds) FILTER (WHERE os.selection = 'draw') AS draw_odds,
@@ -276,6 +365,15 @@ def detect_alpha(
                     'odds_snapshot_source', true,
                     'odds_snapshot_min_quality_score', sqs.min_quality_score,
                     'odds_snapshot_quality_flags', COALESCE(sqs.quality_flags, '{{}}'::text[])
+                    , 'entry_snapshot_id', sqs.entry_snapshot_id
+                    , 'source_name', sqs.source_name
+                    , 'evidence_id', sqs.evidence_id
+                    , 'screenshot_sha256', sqs.screenshot_sha256
+                    , 'safe_for_entry', sqs.safe_for_entry
+                    , 'canonical_match', sqs.canonical_match
+                    , 'duplicate', sqs.duplicate
+                    , 'snapshot_type', sqs.snapshot_type
+                    , 'stale_status', sqs.stale_status
                   ) AS raw_data
               FROM snapshot_quote_sets sqs
               JOIN market_quotes mk ON mk.id = sqs.market_quote_id
@@ -321,10 +419,20 @@ def detect_alpha(
               mk.provider_name,
               COALESCE(NULLIF(mk.raw_data->>'bookmaker', ''), mk.provider_name) AS bookmaker,
               COALESCE((mk.raw_data->>'processed')::boolean, false) AS quote_processed,
+              mk.raw_data->>'entry_snapshot_id' AS entry_snapshot_id,
+              COALESCE(NULLIF(mk.raw_data->>'source_name', ''), mk.provider_name) AS source_name,
+              mk.raw_data->>'evidence_id' AS evidence_id,
+              mk.raw_data->>'screenshot_sha256' AS screenshot_sha256,
+              COALESCE((mk.raw_data->>'safe_for_entry')::boolean, false) AS safe_for_entry,
+              COALESCE((mk.raw_data->>'canonical_match')::boolean, false) AS canonical_match,
+              COALESCE((mk.raw_data->>'duplicate')::boolean, false) AS duplicate,
+              mk.raw_data->>'snapshot_type' AS snapshot_type,
+              mk.raw_data->>'stale_status' AS stale_status,
               mq.market_type,
               mq.line,
               m.status,
               m.match_date,
+              pem.kickoff AS official_kickoff,
               COALESCE(pem.home_team_name, home_comp.team_name) AS home_team_name,
               COALESCE(pem.away_team_name, away_comp.team_name) AS away_team_name,
               mq.home_probability,

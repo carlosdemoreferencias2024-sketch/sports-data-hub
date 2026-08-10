@@ -17,6 +17,7 @@ $resolvedInput = Resolve-Path -LiteralPath $InputPath
 $json = Get-Content -LiteralPath $resolvedInput -Raw | ConvertFrom-Json
 $json | Add-Member -NotePropertyName "dry_run" -NotePropertyValue (-not $Apply) -Force
 $payload = $json | ConvertTo-Json -Depth 16
+$payloadBytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
 $headers = @{ "X-Internal-API-Key" = $InternalApiKey }
 
 Write-Host "[football-today-universe] input=$resolvedInput dry_run=$(-not $Apply) apply=$Apply"
@@ -26,7 +27,7 @@ $response = Invoke-RestMethod `
   -Uri "$HubBaseUrl/api/v1/internal/analytics/football-today-universe" `
   -Headers $headers `
   -ContentType "application/json" `
-  -Body $payload
+  -Body $payloadBytes
 
 Write-Host "[football-today-universe] fixtures=$($response.fixtures_received) would_insert=$($response.fixtures_would_insert) inserted=$($response.fixtures_inserted)"
 Write-Host "[football-today-universe] signals=$($response.signals_received) would_insert=$($response.signals_would_insert) inserted=$($response.signals_inserted)"

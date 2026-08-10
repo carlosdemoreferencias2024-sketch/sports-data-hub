@@ -16,3 +16,19 @@ backups/
 coverage/
 data/
 metabase-data/
+backend/uploads/
+/uploads/
+
+# Date-stamped operational captures and audit payloads are runtime evidence,
+# not source. Keep reusable JSON templates versionable.
+scripts/*_20??????*.json
+scripts/*.dry_run.json
+!scripts/*.template.json
+
+# Generated sports-data-hub research/runtime artifacts
+scripts/football_today_api_football_*.json
+scripts/football_today_espn_*.json
+scripts/football_hydrate_*.json
+scripts/*dry_run_response.json
+workers/mlb_matchup_features_*.csv
+workers/research_payloads/

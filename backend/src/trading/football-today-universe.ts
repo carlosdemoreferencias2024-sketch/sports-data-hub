@@ -2,6 +2,13 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { FOOTBALL_LEAGUES, FOOTBALL_STANDARD_MARKETS, FootballLeagueConfig, FootballMarketKey } from "./football-leagues.config.js";
 import { resolveFootballLeagueId } from "./football-league-aliases.js";
+import {
+  FALLBACK_FOOTBALL_COMPETITION_REGISTRY,
+  getCompetitionByLeagueIdFromRows,
+  getMarketBlockReasonForCompetition,
+  normalizeCompetitionName
+} from "./football-competition-registry.js";
+import { tradingLocalDateWindow } from "./timezone.js";
 
 type Queryable = {
   query: (sql: string, values?: unknown[]) => Promise<{ rows: Record<string, unknown>[]; rowCount?: number }>;
@@ -73,6 +80,10 @@ function toIso(date: Date): string {
   return date.toISOString();
 }
 
+function localDateWindow(date?: string) {
+  return tradingLocalDateWindow(date);
+}
+
 type UniverseLeague = Pick<FootballLeagueConfig, "league_id" | "display_name" | "country_or_region" | "confederation" | "enabled"> & {
   observation_only: boolean;
 };
@@ -82,10 +93,21 @@ function observedLeagueId(value: string): string {
 }
 
 function resolveLeagueOrNull(value: string): UniverseLeague | null {
-  const leagueId = resolveFootballLeagueId(value);
+  const leagueId = normalizeCompetitionName(value) ?? resolveFootballLeagueId(value);
   if (leagueId) {
     const configured = FOOTBALL_LEAGUES.find((league) => league.league_id === leagueId && league.enabled);
     if (configured) return { ...configured, observation_only: false };
+    const competition = getCompetitionByLeagueIdFromRows(leagueId, FALLBACK_FOOTBALL_COMPETITION_REGISTRY);
+    if (competition?.enabled) {
+      return {
+        league_id: competition.league_id,
+        display_name: competition.display_name,
+        country_or_region: competition.country ?? competition.region ?? "Global",
+        confederation: competition.confederation,
+        enabled: true,
+        observation_only: false
+      };
+    }
   }
   return {
     league_id: observedLeagueId(value),
@@ -113,11 +135,14 @@ function getMatchId(input: { provided?: string; date?: string; leagueId: string;
   };
 }
 
-function normalizeSelection(selection: string): "home" | "away" | "draw" | "over" | "under" | "yes" | "no" | null {
+function normalizeSelection(selection: string): "home" | "away" | "draw" | "over" | "under" | "yes" | "no" | "home_draw" | "home_away" | "draw_away" | null {
   const normalized = normalizeText(selection).replace(/-/g, "_");
   if (["home", "local", "home_dnb"].includes(normalized)) return "home";
   if (["away", "visitor", "visitante", "away_dnb"].includes(normalized)) return "away";
   if (["draw", "tie", "empate"].includes(normalized)) return "draw";
+  if (["home_draw", "home_or_draw", "1x"].includes(normalized)) return "home_draw";
+  if (["home_away", "home_or_away", "12"].includes(normalized)) return "home_away";
+  if (["draw_away", "draw_or_away", "x2"].includes(normalized)) return "draw_away";
   if (normalized.startsWith("over")) return "over";
   if (normalized.startsWith("under")) return "under";
   if (["yes", "si", "btts_yes"].includes(normalized)) return "yes";
@@ -125,17 +150,20 @@ function normalizeSelection(selection: string): "home" | "away" | "draw" | "over
   return null;
 }
 
-function quoteColumns(selection: "home" | "away" | "draw" | "over" | "under" | "yes" | "no", odds: number) {
+function quoteColumns(selection: "home" | "away" | "draw" | "over" | "under" | "yes" | "no" | "home_draw" | "home_away" | "draw_away", odds: number) {
   return {
-    home: selection === "home" || selection === "over" || selection === "yes" ? odds : null,
-    away: selection === "away" || selection === "under" || selection === "no" ? odds : null,
-    draw: selection === "draw" ? odds : null
+    home: selection === "home" || selection === "over" || selection === "yes" || selection === "home_draw" ? odds : null,
+    away: selection === "away" || selection === "under" || selection === "no" || selection === "draw_away" ? odds : null,
+    draw: selection === "draw" || selection === "home_away" ? odds : null
   };
 }
 
 function signalState(signal: z.infer<typeof signalSchema>, league: UniverseLeague) {
   if (!signal.market_odds) return "OBSERVATION_ONLY";
   if (league.observation_only) return "MARKET_SNAPSHOT";
+  if (signal.market === "btts") return "MARKET_SNAPSHOT";
+  const competition = getCompetitionByLeagueIdFromRows(league.league_id, FALLBACK_FOOTBALL_COMPETITION_REGISTRY);
+  if (!competition || competition.trust_status === "BLOCKED" || competition.manual_only || competition.is_friendly) return "MARKET_SNAPSHOT";
   if (signal.model_probability === undefined || signal.expected_value === undefined) return "MARKET_SNAPSHOT";
   return "SHADOW_CANDIDATE";
 }
@@ -298,7 +326,7 @@ async function insertSnapshot(
     source: string;
     provider: string;
     market: FootballMarketKey;
-    selection: "home" | "away" | "draw" | "over" | "under" | "yes" | "no";
+    selection: "home" | "away" | "draw" | "over" | "under" | "yes" | "no" | "home_draw" | "home_away" | "draw_away";
     odds: number;
     capturedAt: string;
     rawData: Record<string, unknown>;
@@ -455,6 +483,13 @@ export async function processFootballTodayUniverse(db: Queryable, payload: unkno
       continue;
     }
     const manualReview = signal.raw_data?.manual_review === true || signal.raw_data?.manual_review_required === true;
+    const competition = getCompetitionByLeagueIdFromRows(league.league_id, FALLBACK_FOOTBALL_COMPETITION_REGISTRY);
+    const marketBlockReason = getMarketBlockReasonForCompetition(competition, signal.market, manualReview);
+    if (!league.observation_only && marketBlockReason) {
+      summary.blocked += 1;
+      rows.push({ type: "signal", status: "BLOCKED", reason: marketBlockReason, league_id: league.league_id, market: signal.market, match: `${signal.home_team} vs ${signal.away_team}` });
+      continue;
+    }
     if (signal.market === "btts" && !manualReview) {
       summary.blocked += 1;
       rows.push({ type: "signal", status: "BLOCKED", reason: "btts_requires_manual_review", league_id: league.league_id, market: signal.market, match: `${signal.home_team} vs ${signal.away_team}` });
@@ -562,7 +597,7 @@ export async function processFootballTodayUniverse(db: Queryable, payload: unkno
 }
 
 export async function getFootballTodayUniverse(db: Queryable, date?: string) {
-  const targetDate = date ?? new Date().toISOString().slice(0, 10);
+  const { selectedDate: targetDate, start, end } = localDateWindow(date);
   const summary = await db.query(
     `
       WITH observed_matches AS (
@@ -570,7 +605,8 @@ export async function getFootballTodayUniverse(db: Queryable, date?: string) {
         FROM matches m
         JOIN leagues l ON l.id = m.league_id
         WHERE m.raw_data->>'football_today_universe' = 'true'
-          AND m.match_date::date = $1::date
+          AND m.match_date >= $1::timestamptz
+          AND m.match_date < $2::timestamptz
       ),
       observed_snapshots AS (
         SELECT os.*
@@ -585,7 +621,7 @@ export async function getFootballTodayUniverse(db: Queryable, date?: string) {
         0::int AS shadow_paper,
         (SELECT COUNT(DISTINCT league_id)::int FROM observed_matches) AS leagues_observed
     `,
-    [targetDate]
+    [start, end]
   );
   const byLeague = await db.query(
     `
@@ -598,11 +634,12 @@ export async function getFootballTodayUniverse(db: Queryable, date?: string) {
       JOIN leagues l ON l.id = m.league_id
       LEFT JOIN odds_snapshots os ON os.match_id = m.id AND os.raw_data->>'football_today_universe' = 'true'
       WHERE m.raw_data->>'football_today_universe' = 'true'
-        AND m.match_date::date = $1::date
+        AND m.match_date >= $1::timestamptz
+        AND m.match_date < $2::timestamptz
       GROUP BY l.slug
       ORDER BY observed_fixtures DESC, shadow_candidates DESC
     `,
-    [targetDate]
+    [start, end]
   );
   const byMarket = await db.query(
     `
@@ -612,11 +649,12 @@ export async function getFootballTodayUniverse(db: Queryable, date?: string) {
         COUNT(*) FILTER (WHERE raw_data->>'feed_status' = 'SHADOW_CANDIDATE')::int AS shadow_candidates
       FROM odds_snapshots
       WHERE raw_data->>'football_today_universe' = 'true'
-        AND captured_at::date = $1::date
+        AND captured_at >= $1::timestamptz
+        AND captured_at < $2::timestamptz
       GROUP BY market_type
       ORDER BY shadow_candidates DESC, market_snapshots DESC
     `,
-    [targetDate]
+    [start, end]
   );
   const row = summary.rows[0] ?? {};
   const observed = Number(row.observed_fixtures ?? 0);

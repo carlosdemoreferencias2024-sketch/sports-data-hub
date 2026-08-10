@@ -6,15 +6,30 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY normalizer.py .
+COPY batch_scraper.py .
 COPY base_worker.py .
 COPY odds_worker.py .
 COPY football_worker.py .
+COPY sports_research_worker.py .
+COPY sports_context_incremental_worker.py .
 COPY fair_odds_engine.py .
 COPY pre_bet_validator.py .
+COPY market_integrity_policy.py .
+COPY test_market_integrity_policy.py .
+COPY test_alpha_detector_requires_entry_evidence.py .
+COPY test_settlement_requires_valid_closing.py .
+COPY test_no_entry_as_closing_fallback.py .
+COPY test_post_kickoff_closing_blocked.py .
+COPY test_clean_v2_requires_and_chain.py .
+COPY test_preflight_closing_quality_window.py .
 COPY source_manager.py .
 COPY sportsdataio_validator.py .
+COPY mlb_statsapi_fixture_loader.py .
 COPY generate_stats_template.py .
+COPY generate_mlb_matchup_template.py .
+COPY fill_mlb_matchup_features_from_mlb_api.py .
 COPY ingest_stats.py .
+COPY hydrate_mlb_real_paper_features.py .
 COPY optimizer.py .
 COPY data_fetcher.py .
 COPY model_pipeline.py .

@@ -15,6 +15,7 @@ const aliasPairs: Array<[string, string]> = [
   ["copa del rey", "copa-del-rey"], ["copa-del-rey", "copa-del-rey"],
   ["premier", "premier-league"], ["premier league", "premier-league"], ["epl", "premier-league"], ["liga inglesa", "premier-league"], ["premier-league", "premier-league"],
   ["fa cup", "fa-cup"], ["copa fa", "fa-cup"], ["fa-cup", "fa-cup"],
+  ["league cup", "england-league-cup"], ["efl cup", "england-league-cup"], ["efl league cup", "england-league-cup"], ["carabao cup", "england-league-cup"], ["england league cup", "england-league-cup"], ["england-league-cup", "england-league-cup"],
   ["champions", "uefa-champions-league"], ["ucl", "uefa-champions-league"], ["uefa champions league", "uefa-champions-league"], ["uefa-champions-league", "uefa-champions-league"],
   ["europa league", "europa-league"], ["uel", "europa-league"], ["europa-league", "europa-league"],
   ["conference league", "conference-league"], ["uecl", "conference-league"], ["conference-league", "conference-league"],

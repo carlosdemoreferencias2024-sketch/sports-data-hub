@@ -9,6 +9,7 @@
   [int]$MaxModelAgeMinutes = 240,
   [int]$MaxMarketAgeMinutes = 30,
   [switch]$ClosingOnly,
+  [switch]$AllowQuotaSkip,
   [switch]$DryRun
 )
 
@@ -106,7 +107,34 @@ foreach ($fixture in $hubMlbToday) {
 }
 
 $oddsUrl = "https://api.sportsdata.io/v3/mlb/odds/json/GameOddsByDate/$dateKey"
-$oddsPayload = Invoke-RestMethod -Method Get -Uri $oddsUrl -Headers $sportsDataHeaders
+try {
+  $oddsPayload = Invoke-RestMethod -Method Get -Uri $oddsUrl -Headers $sportsDataHeaders
+} catch {
+  $responseText = ""
+  if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+    $responseText = [string]$_.ErrorDetails.Message
+  } elseif ($_.Exception -and $_.Exception.Message) {
+    $responseText = [string]$_.Exception.Message
+  }
+
+  $isQuotaBlocked = $responseText -match "Out of call volume quota" -or $responseText -match "Quota will be replenished"
+  if ($AllowQuotaSkip -and $isQuotaBlocked) {
+    $quotaStatus = [pscustomobject]@{
+      system_status = "SPORTSDATAIO_QUOTA_EXHAUSTED"
+      date = $dateIso
+      provider_name = $ProviderName
+      closing_only = [bool]$ClosingOnly
+      quotes_loaded = 0
+      clean_sample_impact = "NO_CLOSING_CAPTURED"
+      next_action = "Usar Source Capture Assistant/manual_verified o esperar reposicion de cuota del proveedor."
+      raw_provider_message = $responseText
+    }
+    $quotaStatus | ConvertTo-Json -Depth 6
+    exit 0
+  }
+
+  throw
+}
 $odds = @()
 foreach ($item in $oddsPayload) {
   $odds += $item

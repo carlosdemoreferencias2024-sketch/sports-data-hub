@@ -1,5 +1,6 @@
 import { FOOTBALL_STANDARD_MARKETS, FootballMarketKey } from "./football-leagues.config.js";
 import { resolveFootballLeagueId } from "./football-league-aliases.js";
+import { closingWindowDiagnostics } from "./timezone.js";
 
 type Queryable = {
   query: (sql: string, values?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>;
@@ -23,6 +24,8 @@ type ClosingInput = {
   closing_odds_timestamp: string;
   closing_odds_provider?: string;
   closing_line_source?: string;
+  scheduled_kickoff?: string;
+  source_confidence_score?: number;
 };
 
 type SettlementInput = {
@@ -31,7 +34,7 @@ type SettlementInput = {
   closing_odds?: ClosingInput[];
 };
 
-const SUPPORTED_MARKETS = new Set<FootballMarketKey>(["moneyline_3way", "total_goals_2_5", "draw_no_bet"]);
+const SUPPORTED_MARKETS = new Set<FootballMarketKey>(["moneyline_3way", "total_goals_2_5", "draw_no_bet", "double_chance"]);
 
 function toNumber(value: unknown, fallback = 0): number {
   const parsed = Number(value);
@@ -58,8 +61,49 @@ function decimalClv(entryOdds: number, closingOdds: number) {
   };
 }
 
+function clvBand(clv: number) {
+  if (clv >= 0.005) return "POSITIVE";
+  if (clv >= -0.0025) return "NEUTRAL";
+  if (clv >= -0.01) return "SMALL_NEGATIVE";
+  if (clv >= -0.03) return "NEGATIVE";
+  return "BAD_NEGATIVE";
+}
+
+function closingQuality(closing: ClosingInput, raw: Record<string, unknown>) {
+  const confidence = Number(closing.source_confidence_score ?? raw.source_confidence_score ?? 85);
+  if (Number.isFinite(confidence) && confidence < 70) {
+    return {
+      closing_quality: "SOURCE_WEAK",
+      closing_window_start: null,
+      closing_window_end: null,
+      minutes_before_kickoff: null,
+      minutes_from_valid_window: null,
+      why_invalid: "Source confidence below 70; stored for audit only."
+    };
+  }
+
+  const kickoffRaw = closing.scheduled_kickoff
+    ?? raw.kickoff
+    ?? raw.kickoff_at
+    ?? raw.scheduled_kickoff
+    ?? raw.match_kickoff;
+  return closingWindowDiagnostics(String(closing.closing_odds_timestamp), kickoffRaw ? String(kickoffRaw) : null);
+}
+
 function normalizeSelection(selection: string) {
   return selection.toLowerCase().replace(/\s+/g, "_");
+}
+
+function isHomeDraw(selection: string) {
+  return ["home_draw", "home_or_draw", "1x"].includes(selection);
+}
+
+function isHomeAway(selection: string) {
+  return ["home_away", "home_or_away", "12"].includes(selection);
+}
+
+function isDrawAway(selection: string) {
+  return ["draw_away", "draw_or_away", "x2"].includes(selection);
 }
 
 function gradePick(market: FootballMarketKey, selectionRaw: string, homeScore: number, awayScore: number) {
@@ -78,6 +122,11 @@ function gradePick(market: FootballMarketKey, selectionRaw: string, homeScore: n
     if (homeScore === awayScore) return "PUSH";
     if (selection === "home" || selection === "home_dnb") return homeScore > awayScore ? "WIN" : "LOSS";
     if (selection === "away" || selection === "away_dnb") return awayScore > homeScore ? "WIN" : "LOSS";
+  }
+  if (market === "double_chance") {
+    if (isHomeDraw(selection)) return homeScore >= awayScore ? "WIN" : "LOSS";
+    if (isHomeAway(selection)) return homeScore !== awayScore ? "WIN" : "LOSS";
+    if (isDrawAway(selection)) return awayScore >= homeScore ? "WIN" : "LOSS";
   }
   return "SETTLEMENT_ERROR";
 }
@@ -178,6 +227,7 @@ export async function settleFootballShadow(db: Queryable, body: SettlementInput)
       const closingOdds = Number(closing.closing_odds);
       const entryOdds = Number(trade.market_odds);
       const clv = decimalClv(entryOdds, closingOdds);
+      const quality = closingQuality(closing, raw);
       closingPatch = {
         ...closingPatch,
         closing_odds: closingOdds,
@@ -185,6 +235,13 @@ export async function settleFootballShadow(db: Queryable, body: SettlementInput)
         closing_odds_timestamp_original: closing.closing_odds_timestamp,
         closing_odds_provider: closing.closing_odds_provider ?? "manual_closing",
         closing_line_source: closing.closing_line_source ?? "manual_closing",
+        closing_quality: quality.closing_quality,
+        closing_window_start: quality.closing_window_start,
+        closing_window_end: quality.closing_window_end,
+        minutes_before_kickoff: quality.minutes_before_kickoff,
+        minutes_from_valid_window: quality.minutes_from_valid_window,
+        closing_why_invalid: quality.why_invalid,
+        clv_band: clvBand(clv.clv),
         entry_odds: entryOdds,
         ...clv
       };
@@ -195,7 +252,19 @@ export async function settleFootballShadow(db: Queryable, body: SettlementInput)
 
     if (!result) {
       summary.missing_results += 1;
-      rows.push({ match_id: matchId, market, selection, status: "PENDING_RESULT", closing_status: closeStatus });
+      rows.push({
+        match_id: matchId,
+        market,
+        selection,
+        status: "PENDING_RESULT",
+        closing_status: closeStatus,
+        closing_quality: closingPatch.closing_quality,
+        closing_window_start: closingPatch.closing_window_start,
+        closing_window_end: closingPatch.closing_window_end,
+        minutes_from_valid_window: closingPatch.minutes_from_valid_window,
+        closing_why_invalid: closingPatch.closing_why_invalid,
+        clv_band: closingPatch.clv_band
+      });
       if (!dryRun && closeStatus === "HAS_CLOSING") {
         await db.query(
           `UPDATE paper_trades SET raw_data = raw_data || $1::jsonb, updated_at = NOW() WHERE id = $2`,
@@ -245,7 +314,21 @@ export async function settleFootballShadow(db: Queryable, body: SettlementInput)
       telegram_auto_enabled: false
     };
     summary.would_settle += 1;
-    rows.push({ match_id: matchId, league_id: leagueId, market, selection, status: finalStatus, profit_units: profit, closing_status: closeStatus });
+    rows.push({
+      match_id: matchId,
+      league_id: leagueId,
+      market,
+      selection,
+      status: finalStatus,
+      profit_units: profit,
+      closing_status: closeStatus,
+      closing_quality: closingPatch.closing_quality,
+      closing_window_start: closingPatch.closing_window_start,
+      closing_window_end: closingPatch.closing_window_end,
+      minutes_from_valid_window: closingPatch.minutes_from_valid_window,
+      closing_why_invalid: closingPatch.closing_why_invalid,
+      clv_band: closingPatch.clv_band
+    });
 
     if (!dryRun) {
       await db.query(

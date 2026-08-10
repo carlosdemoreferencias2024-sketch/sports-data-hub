@@ -2,6 +2,7 @@ import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { db } from "../../db/index.js";
 import { AppError } from "../../shared/http-errors.js";
+import { processFootballShadowFeed } from "../../trading/football-market-lab.js";
 import {
   asNumber,
   auditParlayLegs,
@@ -58,6 +59,44 @@ const smartSelectionQuerySchema = z.object({
   max_model_age_minutes: z.coerce.number().int().positive().max(24 * 60).default(240),
   max_market_age_minutes: z.coerce.number().int().positive().max(24 * 60).default(30),
   limit: z.coerce.number().int().min(1).max(200).default(50)
+});
+
+const ownedFairOddsBridgeQuerySchema = z.object({
+  sport: z.string().min(1).max(40).default("soccer"),
+  model_name: z.string().min(1).max(80).default("sports_data_hub_football_fair_odds_v1"),
+  mode: z.enum(["live", "historical"]).default("live"),
+  date: z.string().optional(),
+  min_ev: z.coerce.number().default(0.03),
+  min_confidence: z.coerce.number().min(0).max(1).default(0),
+  min_shadow_confidence: z.coerce.number().min(0).max(1).default(0.5),
+  max_model_age_minutes: z.coerce.number().int().positive().max(90 * 24 * 60).default(1440),
+  max_market_age_minutes: z.coerce.number().int().positive().max(90 * 24 * 60).default(240),
+  limit: z.coerce.number().int().min(1).max(300).default(80)
+});
+
+const ownedFairOddsShadowRegisterQuerySchema = ownedFairOddsBridgeQuerySchema.extend({
+  dry_run: z.preprocess((value) => {
+    if (value === undefined || value === null || value === "") return true;
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number") return value !== 0;
+    if (typeof value === "string") {
+      const normalized = value.trim().toLowerCase();
+      if (["false", "0", "no", "n", "off"].includes(normalized)) return false;
+      if (["true", "1", "yes", "y", "si", "sí", "on"].includes(normalized)) return true;
+    }
+    return value;
+  }, z.boolean()).default(true),
+  apply: z.preprocess((value) => {
+    if (value === undefined || value === null || value === "") return false;
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number") return value !== 0;
+    if (typeof value === "string") {
+      const normalized = value.trim().toLowerCase();
+      if (["true", "1", "yes", "y", "si", "sí", "on"].includes(normalized)) return true;
+      if (["false", "0", "no", "n", "off"].includes(normalized)) return false;
+    }
+    return value;
+  }, z.boolean()).default(false)
 });
 
 const parlayQuerySchema = z.object({
@@ -454,6 +493,577 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
     };
   });
 
+  async function buildOwnedFairOddsBridge(rawQuery: unknown = {}) {
+    const query = ownedFairOddsBridgeQuerySchema.parse(rawQuery);
+    const maxModelAgeMinutes = query.mode === "historical"
+      ? Math.max(query.max_model_age_minutes, 90 * 24 * 60)
+      : query.max_model_age_minutes;
+    const maxMarketAgeMinutes = query.mode === "historical"
+      ? Math.max(query.max_market_age_minutes, 90 * 24 * 60)
+      : query.max_market_age_minutes;
+    const values: Array<string | number> = [
+      query.model_name,
+      query.sport,
+      query.min_confidence,
+      maxModelAgeMinutes,
+      maxMarketAgeMinutes,
+      query.min_ev,
+      query.limit,
+      query.date ?? "",
+      query.mode,
+      query.min_shadow_confidence
+    ];
+
+    const result = await db.query(
+      `
+        WITH latest_model_quotes AS (
+          SELECT DISTINCT ON (mq.match_id, mq.model_name, mq.market_type, COALESCE(mq.line, -9999))
+            mq.*
+          FROM model_quotes mq
+          JOIN matches m ON m.id = mq.match_id
+          JOIN leagues l ON l.id = m.league_id
+          JOIN sports s ON s.id = l.sport_id
+          WHERE mq.model_name = $1
+            AND s.slug = $2
+            AND mq.confidence >= $3
+            AND (
+              ($8::text = '' AND mq.generated_at >= NOW() - ($4::int * INTERVAL '1 minute'))
+              OR (
+                $8::text <> ''
+                AND m.match_date >= (($8::date)::timestamp AT TIME ZONE 'America/Matamoros')
+                AND m.match_date < ((($8::date + 1)::timestamp) AT TIME ZONE 'America/Matamoros')
+              )
+            )
+            AND (
+              ($9::text = 'historical' AND m.status::text IN ('scheduled', 'live', 'finished', 'postponed', 'cancelled'))
+              OR ($9::text = 'live' AND m.status::text IN ('scheduled', 'live'))
+            )
+          ORDER BY mq.match_id, mq.model_name, mq.market_type, COALESCE(mq.line, -9999), mq.generated_at DESC
+        ),
+        model_selections AS (
+          SELECT
+            mq.id AS model_quote_id,
+            mq.match_id,
+            s.slug AS sport_slug,
+            l.slug AS league_slug,
+            mq.model_name,
+            mq.market_type,
+            mq.line,
+            m.status,
+            m.match_date,
+            COALESCE(pem.home_team_name, home_comp.team_name) AS home_team_name,
+            COALESCE(pem.away_team_name, away_comp.team_name) AS away_team_name,
+            mq.confidence,
+            mq.generated_at,
+            COALESCE(mq.raw_data->>'model_family', 'unknown') AS model_family,
+            COALESCE(mq.raw_data->>'calibration_state', 'UNKNOWN') AS calibration_state,
+            COALESCE((mq.raw_data->>'champion_model_ready')::boolean, false) AS champion_model_ready,
+            COALESCE((mq.raw_data->>'analysis_only')::boolean, false) AS analysis_only,
+            CASE
+              WHEN s.slug = 'soccer'
+                AND mq.market_type <> 'over_under_2_5'
+                AND l.slug LIKE 'football-observed-uefa-%'
+                AND (
+                  l.slug LIKE '%champions-league-qualification%'
+                  OR l.slug LIKE '%europa-league-qualification%'
+                  OR l.slug LIKE '%europa-conference-league%'
+                )
+              THEN TRUE
+              ELSE COALESCE((mq.raw_data->>'promotion_allowed')::boolean, true)
+            END AS promotion_allowed,
+            selection.market_selection,
+            selection.model_probability,
+            selection.model_fair_odds,
+            selection.min_market_odds_for_ev
+          FROM latest_model_quotes mq
+          JOIN matches m ON m.id = mq.match_id
+          JOIN leagues l ON l.id = m.league_id
+          JOIN sports s ON s.id = l.sport_id
+          LEFT JOIN provider_event_mappings pem ON pem.hub_match_id = mq.match_id AND pem.is_active = TRUE
+          LEFT JOIN LATERAL (
+            SELECT t.name AS team_name
+            FROM match_competitors mc
+            JOIN teams t ON t.id = mc.team_id
+            WHERE mc.match_id = mq.match_id AND mc.home_away = 'home'
+            LIMIT 1
+          ) home_comp ON TRUE
+          LEFT JOIN LATERAL (
+            SELECT t.name AS team_name
+            FROM match_competitors mc
+            JOIN teams t ON t.id = mc.team_id
+            WHERE mc.match_id = mq.match_id AND mc.home_away = 'away'
+            LIMIT 1
+          ) away_comp ON TRUE
+          CROSS JOIN LATERAL (
+            VALUES
+              (
+                COALESCE(
+                  mq.raw_data #>> ARRAY['selection_map', 'home'],
+                  CASE WHEN mq.market_type LIKE 'over_under%' THEN 'over' ELSE 'home' END
+                ),
+                mq.home_probability,
+                mq.home_fair_odds,
+                ((mq.raw_data #>> ARRAY['min_market_odds_for_ev', 'home'])::numeric)
+              ),
+              (
+                COALESCE(
+                  mq.raw_data #>> ARRAY['selection_map', 'away'],
+                  CASE WHEN mq.market_type LIKE 'over_under%' THEN 'under' ELSE 'away' END
+                ),
+                mq.away_probability,
+                mq.away_fair_odds,
+                ((mq.raw_data #>> ARRAY['min_market_odds_for_ev', 'away'])::numeric)
+              ),
+              (
+                COALESCE(mq.raw_data #>> ARRAY['selection_map', 'draw'], 'draw'),
+                mq.draw_probability,
+                mq.draw_fair_odds,
+                ((mq.raw_data #>> ARRAY['min_market_odds_for_ev', 'draw'])::numeric)
+              )
+          ) AS selection(market_selection, model_probability, model_fair_odds, min_market_odds_for_ev)
+          WHERE selection.model_probability IS NOT NULL
+            AND selection.model_fair_odds IS NOT NULL
+            AND NOT (COALESCE(mq.raw_data->'disabled_selections', '[]'::jsonb) ? selection.market_selection)
+        ),
+        latest_market_quotes AS (
+          SELECT DISTINCT ON (mk.match_id, mk.provider_name, mk.market_type, COALESCE(mk.line, -9999))
+            mk.*
+          FROM market_quotes mk
+          ORDER BY mk.match_id, mk.provider_name, mk.market_type, COALESCE(mk.line, -9999), mk.captured_at DESC
+        ),
+        bridged AS (
+          SELECT
+            ms.*,
+            best_market.market_quote_id,
+            best_market.provider_name,
+            best_market.bookmaker,
+            best_market.source_label,
+            best_market.source_url,
+            best_market.verified_by,
+            best_market.captured_at,
+            best_market.market_odds,
+            best_market.market_implied_probability,
+            best_market.market_no_vig_probability,
+            best_market.market_overround,
+            CASE
+              WHEN best_market.market_odds IS NULL THEN NULL
+              ELSE ROUND(((ms.model_probability * best_market.market_odds) - 1)::numeric, 6)
+            END AS expected_value,
+            CASE
+              WHEN best_market.market_odds IS NULL OR ms.model_fair_odds IS NULL THEN NULL
+              ELSE ROUND(((best_market.market_odds / ms.model_fair_odds) - 1)::numeric, 6)
+            END AS edge_to_fair,
+            CASE
+              WHEN ms.model_probability IS NULL OR ms.model_probability = 0 THEN NULL
+              ELSE ROUND((1.03 / ms.model_probability)::numeric, 4)
+            END AS min_odds_for_ev_3,
+            CASE
+              WHEN ms.model_probability IS NULL OR ms.model_probability = 0 THEN NULL
+              ELSE ROUND((1.05 / ms.model_probability)::numeric, 4)
+            END AS min_odds_for_ev_5,
+            CASE
+              WHEN best_market.market_no_vig_probability IS NULL OR ms.model_probability IS NULL THEN NULL
+              ELSE ROUND((ms.model_probability - best_market.market_no_vig_probability)::numeric, 6)
+            END AS model_vs_market_gap
+          FROM model_selections ms
+          LEFT JOIN LATERAL (
+            SELECT
+              mk.id AS market_quote_id,
+              mk.provider_name,
+              NULLIF(mk.raw_data->>'bookmaker', '') AS bookmaker,
+              NULLIF(mk.raw_data->>'source_label', '') AS source_label,
+              NULLIF(COALESCE(mk.raw_data->>'source_url', mk.raw_data->>'source_reference'), '') AS source_url,
+              NULLIF(mk.raw_data->>'verified_by', '') AS verified_by,
+              mk.captured_at,
+              market_selection.market_odds,
+              CASE
+                WHEN market_selection.market_odds IS NULL OR market_selection.market_odds <= 1 THEN NULL
+                ELSE ROUND((1 / market_selection.market_odds)::numeric, 6)
+              END AS market_implied_probability,
+              CASE
+                WHEN market_selection.market_odds IS NULL OR market_selection.market_odds <= 1 OR market_probabilities.market_overround IS NULL OR market_probabilities.market_overround = 0 THEN NULL
+                ELSE ROUND(((1 / market_selection.market_odds) / market_probabilities.market_overround)::numeric, 6)
+              END AS market_no_vig_probability,
+              ROUND(market_probabilities.market_overround::numeric, 6) AS market_overround
+            FROM latest_market_quotes mk
+            CROSS JOIN LATERAL (
+              VALUES
+                (
+                  COALESCE(
+                    mk.raw_data #>> ARRAY['selection_map', 'home'],
+                    CASE WHEN mk.market_type LIKE 'over_under%' THEN 'over' ELSE 'home' END
+                  ),
+                  mk.home_odds
+                ),
+                (
+                  COALESCE(
+                    mk.raw_data #>> ARRAY['selection_map', 'away'],
+                    CASE WHEN mk.market_type LIKE 'over_under%' THEN 'under' ELSE 'away' END
+                  ),
+                  mk.away_odds
+                ),
+                (COALESCE(mk.raw_data #>> ARRAY['selection_map', 'draw'], 'draw'), mk.draw_odds)
+            ) AS market_selection(market_selection, market_odds)
+            CROSS JOIN LATERAL (
+              SELECT SUM(1 / odds_value)::numeric AS market_overround
+              FROM (
+                VALUES (mk.home_odds), (mk.away_odds), (mk.draw_odds)
+              ) AS odds(odds_value)
+              WHERE odds_value IS NOT NULL AND odds_value > 1
+            ) market_probabilities
+            WHERE mk.match_id = ms.match_id
+              AND mk.market_type = ms.market_type
+              AND COALESCE(mk.line, -9999) = COALESCE(ms.line, -9999)
+              AND market_selection.market_selection = ms.market_selection
+              AND market_selection.market_odds IS NOT NULL
+            ORDER BY
+              CASE WHEN mk.captured_at >= NOW() - ($5::int * INTERVAL '1 minute') THEN 0 ELSE 1 END,
+              market_selection.market_odds DESC,
+              mk.captured_at DESC
+            LIMIT 1
+          ) best_market ON TRUE
+        )
+        SELECT
+          *,
+          CASE
+            WHEN analysis_only THEN 'ANALYSIS_ONLY'
+            WHEN NOT promotion_allowed THEN 'PROMOTION_NOT_ALLOWED'
+            WHEN $9::text = 'historical' AND market_quote_id IS NOT NULL THEN 'HISTORICAL_COMPARISON'
+            WHEN market_quote_id IS NULL THEN 'MARKET_ODDS_MISSING'
+            WHEN LOWER(provider_name) LIKE '%manual%' AND verified_by IS NULL THEN 'MANUAL_ODDS_UNVERIFIED'
+            WHEN captured_at < NOW() - ($5::int * INTERVAL '1 minute') THEN 'STALE_MARKET_ODDS'
+            WHEN sport_slug = 'soccer' AND calibration_state IN ('UNCALIBRATED_PRIOR', 'CALIBRATING') AND expected_value > 0 THEN 'CALIBRATING'
+            WHEN expected_value >= $6 AND confidence >= $10 THEN 'READY_FOR_SHADOW_REVIEW'
+            WHEN expected_value >= $6 THEN 'MODEL_CONFIDENCE_REVIEW'
+            WHEN expected_value > 0 THEN 'POSITIVE_EV_WATCH'
+            WHEN market_odds < COALESCE(min_market_odds_for_ev, min_odds_for_ev_3) THEN 'NO_BET_PRICE_TOO_LOW'
+            ELSE 'NO_EDGE'
+          END AS bridge_status,
+          CASE
+            WHEN analysis_only THEN 'Modelo preparado, pero este mercado sigue analysis-only.'
+            WHEN NOT promotion_allowed THEN 'Cuota real comparada, pero la liga/mercado no permite promocion automatica.'
+            WHEN $9::text = 'historical' AND market_quote_id IS NOT NULL THEN 'Comparacion historica contra cuota real antigua; auditoria solamente, no promueve picks.'
+            WHEN market_quote_id IS NULL THEN 'Falta cuota real de mercado para comparar contra nuestra linea.'
+            WHEN sport_slug = 'soccer' AND calibration_state IN ('UNCALIBRATED_PRIOR', 'CALIBRATING') AND expected_value > 0 THEN 'EV detectado, pero el modelo de futbol esta en CALIBRATING; exige Brier/log loss/CLV antes de Shadow serio.'
+            WHEN expected_value >= $6 AND confidence >= $10 THEN 'Cuota real supera nuestra cuota minima y la confianza minima; revisar Shadow Paper.'
+            WHEN expected_value >= $6 THEN 'EV positivo, pero la confianza del modelo propio aun no alcanza para Shadow Review.'
+            WHEN expected_value > 0 THEN 'EV positivo pequeño; observar sin promover.'
+            ELSE 'La cuota real no supera nuestra linea propia.'
+          END AS recommendation,
+          EXTRACT(EPOCH FROM (NOW() - generated_at))::int AS model_age_seconds,
+          EXTRACT(EPOCH FROM (NOW() - captured_at))::int AS market_age_seconds
+        FROM bridged
+        ORDER BY
+          CASE
+            WHEN analysis_only THEN 5
+            WHEN NOT promotion_allowed THEN 4
+            WHEN market_quote_id IS NULL THEN 2
+            WHEN LOWER(provider_name) LIKE '%manual%' AND verified_by IS NULL THEN 2
+            WHEN captured_at < NOW() - ($5::int * INTERVAL '1 minute') THEN 2
+            WHEN sport_slug = 'soccer' AND calibration_state IN ('UNCALIBRATED_PRIOR', 'CALIBRATING') AND expected_value > 0 THEN 1
+            WHEN expected_value >= $6 AND confidence >= $10 THEN 0
+            WHEN expected_value >= $6 THEN 1
+            WHEN expected_value > 0 THEN 1
+            WHEN market_odds < COALESCE(min_market_odds_for_ev, min_odds_for_ev_3) THEN 3
+            ELSE 3
+          END,
+          expected_value DESC NULLS LAST,
+          confidence DESC,
+          generated_at DESC
+        LIMIT $7;
+      `,
+      values
+    );
+
+    const toNumberOrNull = (value: unknown): number | null => {
+      if (value === null || value === undefined || value === "") return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+
+    const rows = result.rows.map((row) => {
+      const bridgeStatus = String(row.bridge_status ?? "");
+      const sportSlug = String(row.sport_slug ?? query.sport ?? "").toLowerCase();
+      const marketType = String(row.market_type ?? "").toLowerCase();
+      const calibrationState = String(row.calibration_state ?? "").toUpperCase();
+      const expectedValue = toNumberOrNull(row.expected_value);
+      const marketOdds = toNumberOrNull(row.market_odds);
+      const modelProbability = toNumberOrNull(row.model_probability);
+      const marketNoVigProbability = toNumberOrNull(row.market_no_vig_probability);
+      const modelVsMarketGap = toNumberOrNull(row.model_vs_market_gap);
+      const flags: string[] = [];
+      const whyYes: string[] = [];
+      const whyNo: string[] = [];
+
+      if (row.market_quote_id) whyYes.push("cuota real verificada");
+      if (expectedValue !== null && expectedValue > 0) whyYes.push("EV positivo contra fair odds propia");
+      if (row.verified_by) whyYes.push("fuente con verificador");
+      if (marketNoVigProbability !== null) whyYes.push("probabilidad de mercado sin vig calculada");
+
+      if (sportSlug === "soccer" && expectedValue !== null) {
+        if (expectedValue >= 0.6) flags.push("EXTREME_EV_AUDIT");
+        if (expectedValue >= 0.3) flags.push("AGGRESSIVE_VALUE_AUDIT");
+      }
+      if (
+        sportSlug === "soccer" &&
+        marketType === "moneyline_3way" &&
+        marketOdds !== null &&
+        expectedValue !== null &&
+        marketOdds >= 4 &&
+        expectedValue >= 0.25
+      ) {
+        flags.push("AGGRESSIVE_UNDERDOG");
+      }
+      if (sportSlug === "soccer" && marketOdds !== null && marketOdds >= 7) {
+        flags.push("LONGSHOT_AUDIT");
+      }
+      if (sportSlug === "soccer" && modelVsMarketGap !== null && Math.abs(modelVsMarketGap) >= 0.12) {
+        flags.push("MODEL_MARKET_GAP_HIGH");
+      }
+      if (sportSlug === "soccer" && ["UNCALIBRATED_PRIOR", "CALIBRATING"].includes(calibrationState)) {
+        flags.push(calibrationState === "CALIBRATING" ? "CALIBRATING_CAP" : "UNCALIBRATED_PRIOR_CAP");
+        whyNo.push("modelo de futbol en calibracion; no permite Football Confirmed Paper");
+      }
+      if (flags.includes("AGGRESSIVE_VALUE_AUDIT")) {
+        whyNo.push("EV muy alto; requiere closing, settlement y CLV antes de confiar");
+      }
+      if (flags.includes("MODEL_MARKET_GAP_HIGH") && modelProbability !== null && marketNoVigProbability !== null) {
+        whyNo.push("gap modelo vs mercado no-vig alto");
+      }
+      if (!row.market_quote_id) whyNo.push("falta cuota real usable");
+      if (bridgeStatus === "STALE_MARKET_ODDS") whyNo.push("cuota real vieja para el umbral configurado");
+      if (bridgeStatus === "MANUAL_ODDS_UNVERIFIED") whyNo.push("cuota manual sin verified_by");
+      if (bridgeStatus === "NO_BET_PRICE_TOO_LOW") whyNo.push("precio real debajo del minimo EV");
+
+      const auditStatus = flags.includes("EXTREME_EV_AUDIT")
+        ? "EXTREME_EV_AUDIT"
+        : flags.includes("AGGRESSIVE_VALUE_AUDIT")
+          ? "AGGRESSIVE_VALUE_AUDIT"
+          : flags.includes("MODEL_MARKET_GAP_HIGH")
+            ? "MODEL_MARKET_GAP_REVIEW"
+            : "NORMAL_MARKET_AUDIT";
+      const enrichedRow = {
+        ...row,
+        audit_status: auditStatus,
+        audit_flags: Array.from(new Set(flags)),
+        why_yes: Array.from(new Set(whyYes)),
+        why_no: Array.from(new Set(whyNo)),
+        confirmed_pick: false,
+        football_confirmed_paper_allowed: false
+      };
+      if (bridgeStatus === "STALE_MARKET_ODDS") {
+        return { ...enrichedRow, recommendation: "La cuota real existe, pero esta vieja para el umbral configurado." };
+      }
+      if (bridgeStatus === "MANUAL_ODDS_UNVERIFIED") {
+        return { ...enrichedRow, recommendation: "Cuota manual sin verified_by; no se usa para Shadow Review." };
+      }
+      if (bridgeStatus === "NO_BET_PRICE_TOO_LOW") {
+        return { ...enrichedRow, recommendation: "La cuota real no paga suficiente contra nuestra fair odds; no hay EV minimo." };
+      }
+      if (flags.includes("AGGRESSIVE_VALUE_AUDIT") && bridgeStatus === "READY_FOR_SHADOW_REVIEW") {
+        return { ...enrichedRow, recommendation: "Shadow Review valido, pero con auditoria agresiva por EV/gap; exigir closing y settlement." };
+      }
+      return enrichedRow;
+    });
+    const count = (status: string) => rows.filter((row) => row.bridge_status === status).length;
+    const countFlag = (flag: string) => rows.filter((row) => (row.audit_flags || []).includes(flag)).length;
+
+    return {
+      system_status: "OWNED_FAIR_ODDS_MARKET_BRIDGE",
+      model_name: query.model_name,
+      sport: query.sport,
+      mode: query.mode,
+      date: query.date ?? null,
+      min_ev: query.min_ev,
+      min_shadow_confidence: query.min_shadow_confidence,
+      count: rows.length,
+      summary: {
+        ready_for_shadow_review: count("READY_FOR_SHADOW_REVIEW"),
+        calibrating: count("CALIBRATING"),
+        model_confidence_review: count("MODEL_CONFIDENCE_REVIEW"),
+        positive_ev_watch: count("POSITIVE_EV_WATCH"),
+        market_odds_missing: count("MARKET_ODDS_MISSING"),
+        stale_market_odds: count("STALE_MARKET_ODDS"),
+        manual_odds_unverified: count("MANUAL_ODDS_UNVERIFIED"),
+        no_bet_price_too_low: count("NO_BET_PRICE_TOO_LOW"),
+        historical_comparison: count("HISTORICAL_COMPARISON"),
+        promotion_not_allowed: count("PROMOTION_NOT_ALLOWED"),
+        analysis_only: count("ANALYSIS_ONLY"),
+        no_edge: count("NO_EDGE"),
+        aggressive_value_audit: countFlag("AGGRESSIVE_VALUE_AUDIT"),
+        extreme_ev_audit: countFlag("EXTREME_EV_AUDIT"),
+        aggressive_underdog: countFlag("AGGRESSIVE_UNDERDOG"),
+        longshot_audit: countFlag("LONGSHOT_AUDIT"),
+        model_market_gap_high: countFlag("MODEL_MARKET_GAP_HIGH"),
+        uncalibrated_prior_cap: countFlag("UNCALIBRATED_PRIOR_CAP"),
+        calibrating_cap: countFlag("CALIBRATING_CAP")
+      },
+      rows,
+      recommendation: count("READY_FOR_SHADOW_REVIEW") > 0
+        ? "Hay señales con cuota real arriba de nuestra linea; revisar solo Shadow Paper."
+        : "La linea propia ya existe; falta mercado real o EV suficiente para Shadow Review.",
+      guardrails: {
+        real_candidate_count: 0,
+        real_money_enabled: false,
+        kelly_enabled: false,
+        telegram_auto_enabled: false,
+        shadow_paper_only_for_football: true
+      }
+    };
+  }
+
+  async function registerOwnedFairOddsShadowReview(rawQuery: unknown = {}, rawBody: unknown = {}) {
+    const input = {
+      ...(rawQuery && typeof rawQuery === "object" ? rawQuery as Record<string, unknown> : {}),
+      ...(rawBody && typeof rawBody === "object" ? rawBody as Record<string, unknown> : {})
+    };
+    const query = ownedFairOddsShadowRegisterQuerySchema.parse(input);
+    const dryRun = query.apply ? false : query.dry_run;
+    const bridge = await buildOwnedFairOddsBridge({
+      sport: query.sport,
+      model_name: query.model_name,
+      mode: query.mode,
+      date: query.date,
+      min_ev: query.min_ev,
+      min_confidence: query.min_confidence,
+      min_shadow_confidence: query.min_shadow_confidence,
+      max_model_age_minutes: query.max_model_age_minutes,
+      max_market_age_minutes: query.max_market_age_minutes,
+      limit: query.limit
+    }) as Record<string, any>;
+
+    const rows = Array.isArray(bridge.rows) ? bridge.rows as Array<Record<string, any>> : [];
+    const readyRows = rows.filter((row) => String(row.bridge_status || "") === "READY_FOR_SHADOW_REVIEW");
+    const now = new Date();
+    const signals = readyRows
+      .filter((row) => {
+        const kickoff = new Date(String(row.match_date || ""));
+        return Number.isNaN(kickoff.getTime()) || kickoff.getTime() > now.getTime();
+      })
+      .map((row) => {
+        const sourceUrl = String(row.source_url || "").trim();
+        const sourceLabel = String(row.source_label || row.bookmaker || row.provider_name || "verified_market_quote").trim();
+        const consensusEvidence = sourceUrl || sourceLabel;
+        const auditFlags = Array.isArray(row.audit_flags) ? row.audit_flags : [];
+        return {
+          match_id: String(row.match_id),
+          league_id: String(row.league_slug || ""),
+          league: String(row.league_slug || ""),
+          market: String(row.market_type),
+          selection: String(row.market_selection),
+          home_team: String(row.home_team_name || ""),
+          away_team: String(row.away_team_name || ""),
+          model_version: String(row.model_name || query.model_name),
+          provider: String(row.provider_name || "verified_market_quote_bridge"),
+          model_probability: Number(row.model_probability),
+          market_odds: Number(row.market_odds),
+          expected_value: Number(row.expected_value),
+          bankroll_allocation: 0.01,
+          raw_data: {
+            source: sourceLabel,
+            source_label: sourceLabel,
+            source_url: sourceUrl || null,
+            bookmaker: row.bookmaker || row.provider_name || "verified_market_quote",
+            verified_by: row.verified_by || "sports_data_hub_market_bridge",
+            odds_timestamp: row.captured_at,
+            entry_odds: Number(row.market_odds),
+            entry_odds_timestamp: row.captured_at,
+            model_quote_id: row.model_quote_id,
+            market_quote_id: row.market_quote_id,
+            model_name: row.model_name || query.model_name,
+            model_family: row.model_family || "football_context_prior_v1",
+            calibration_state: row.calibration_state || "UNKNOWN",
+            champion_model_ready: row.champion_model_ready === true,
+            market_implied_probability: row.market_implied_probability ?? null,
+            market_no_vig_probability: row.market_no_vig_probability ?? null,
+            market_overround: row.market_overround ?? null,
+            model_vs_market_gap: row.model_vs_market_gap ?? null,
+            edge_to_fair: row.edge_to_fair ?? null,
+            min_odds_for_ev_3: row.min_odds_for_ev_3 ?? null,
+            min_odds_for_ev_5: row.min_odds_for_ev_5 ?? null,
+            bridge_status: row.bridge_status,
+            bridge_recommendation: row.recommendation,
+            audit_status: row.audit_status,
+            audit_flags: auditFlags,
+            why_yes: row.why_yes || [],
+            why_no: row.why_no || [],
+            settlement_type: "SHADOW_REVIEW_RESULT",
+            shadow_review_registered_from_bridge: true,
+            shadow_paper_only: true,
+            confirmed_pick: false,
+            football_confirmed_paper_allowed: false,
+            real_money_enabled: false,
+            kelly_enabled: false,
+            telegram_auto_enabled: false,
+            requires_closing_snapshot: true,
+            requires_shadow_settlement: true,
+            requires_segment_calibration: true,
+            kickoff_trusted: true,
+            validation_status: "VERIFIED_MARKET_BRIDGE",
+            source_consensus: "official_or_verified_market_quote_bridge",
+            consensus_verified: true,
+            consensus_evidence_url: consensusEvidence
+          }
+        };
+      })
+      .filter((signal) => {
+        return signal.match_id
+          && signal.league_id
+          && signal.market
+          && signal.selection
+          && signal.home_team
+          && signal.away_team
+          && Number.isFinite(signal.model_probability)
+          && Number.isFinite(signal.market_odds)
+          && Number.isFinite(signal.expected_value);
+      });
+
+    const postKickoffSkipped = readyRows.length - signals.length;
+    const feed = await processFootballShadowFeed(db, {
+      dry_run: dryRun,
+      signals: signals as Parameters<typeof processFootballShadowFeed>[1]["signals"]
+    }) as Record<string, any>;
+
+    return {
+      system_status: "FOOTBALL_OWNED_FAIR_ODDS_SHADOW_REVIEW_REGISTER",
+      date: query.date ?? null,
+      dry_run: dryRun,
+      apply_requested: query.apply,
+      bridge_summary: bridge.summary,
+      scanned_bridge_rows: rows.length,
+      ready_for_shadow_review: readyRows.length,
+      post_kickoff_skipped: postKickoffSkipped,
+      signals_prepared: signals.length,
+      feed_summary: {
+        would_insert: feed.would_insert,
+        inserted: feed.inserted,
+        duplicates: feed.duplicates,
+        skipped: feed.skipped,
+        blocked: feed.blocked,
+        errors: feed.errors ?? 0
+      },
+      rows: feed.rows,
+      recommendation: dryRun
+        ? "Dry-run listo. Si no hay bloqueos ni placeholders, repetir con apply=true para crear tickets Shadow Paper."
+        : "Tickets Shadow Paper registrados; ahora closing/settlement pueden calcular CLV y performance por segmento.",
+      guardrails: {
+        real_candidate_count: 0,
+        real_money_enabled: false,
+        kelly_enabled: false,
+        telegram_auto_enabled: false,
+        shadow_paper_only_for_football: true,
+        football_confirmed_paper_allowed: false
+      }
+    };
+  }
+
+  app.get("/api/v1/internal/model-quotes/owned-fair-odds-bridge", async (request) => buildOwnedFairOddsBridge(request.query));
+  app.get("/api/v1/trading/football-owned-fair-odds/bridge", async (request) => buildOwnedFairOddsBridge(request.query));
+  app.get("/api/trading/football-owned-fair-odds/bridge", async (request) => buildOwnedFairOddsBridge(request.query));
+  app.post("/api/v1/internal/model-quotes/owned-fair-odds-bridge/register-shadow-review", async (request) => registerOwnedFairOddsShadowReview(request.query, request.body));
+  app.post("/api/v1/trading/football-owned-fair-odds/bridge/register-shadow-review", async (request) => registerOwnedFairOddsShadowReview(request.query, request.body));
+  app.post("/api/trading/football-owned-fair-odds/bridge/register-shadow-review", async (request) => registerOwnedFairOddsShadowReview(request.query, request.body));
+
   app.get("/api/v1/internal/model-quotes/performance-summary", async (request) => {
     const result = await db.query(
       `
@@ -820,6 +1430,7 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
           COUNT(*) FILTER (WHERE processed = FALSE)::int AS pending,
           COUNT(*) FILTER (WHERE processed = TRUE)::int AS processed,
           ROUND(AVG(expected_value)::numeric, 6) AS avg_expected_value,
+          ROUND(AVG(clv)::numeric, 6) AS avg_clv,
           ROUND(MAX(expected_value)::numeric, 6) AS max_expected_value,
           MAX(detected_at) AS latest_detected_at
         FROM alpha_opportunities
@@ -943,6 +1554,23 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
   app.get("/api/v1/internal/model-quotes/real-paper-summary", async () => {
     const result = await db.query(
       `
+        WITH canonical AS (
+          SELECT
+            rps.*,
+            (
+              rps.status IN ('WIN', 'LOSS', 'PUSH', 'SETTLED')
+              AND rps.clv IS NOT NULL
+              AND rps.raw_data->>'closing_quality' = 'CAPTURED_ON_TIME'
+              AND rps.raw_data->>'result_source_verified' = 'true'
+              AND rps.raw_data->>'settlement_final' = 'true'
+              AND rps.raw_data->>'clv_valid' = 'true'
+              AND rps.raw_data->>'clean_v2_eligible' = 'true'
+              AND COALESCE(rps.raw_data->>'audit_only', 'true') = 'false'
+            ) AS is_clean_v2
+          FROM real_paper_snapshots rps
+          WHERE rps.duplicate_of_id IS NULL
+            AND COALESCE(rps.data_state, 'FRESH') <> 'DUPLICATE'
+        )
         SELECT
           sport_slug,
           league_slug,
@@ -952,19 +1580,49 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
           COUNT(*)::int AS total,
           COUNT(*) FILTER (WHERE status = 'OPEN')::int AS open,
           COUNT(*) FILTER (WHERE status IN ('WIN', 'LOSS', 'PUSH', 'SETTLED'))::int AS settled,
+          COUNT(*) FILTER (WHERE is_clean_v2)::int AS clean_v2_closed,
+          COUNT(*) FILTER (WHERE status IN ('WIN', 'LOSS', 'PUSH', 'SETTLED') AND NOT is_clean_v2)::int AS legacy_only_closed,
           ROUND(AVG(expected_value)::numeric, 6) AS avg_expected_value,
-          ROUND(AVG(clv)::numeric, 6) AS avg_clv,
-          ROUND(COALESCE(SUM(profit_loss), 0)::numeric, 4) AS profit_loss_units,
+          ROUND(AVG(clv) FILTER (WHERE is_clean_v2)::numeric, 6) AS clean_v2_avg_clv,
+          ROUND(AVG(clv) FILTER (WHERE NOT is_clean_v2)::numeric, 6) AS legacy_avg_clv,
+          ROUND((COALESCE(SUM(profit_loss) FILTER (WHERE is_clean_v2), 0) / 100.0)::numeric, 4) AS clean_v2_profit_units,
+          ROUND((COALESCE(SUM(profit_loss) FILTER (WHERE NOT is_clean_v2), 0) / 100.0)::numeric, 4) AS legacy_profit_units,
+          ROUND((COALESCE(SUM(profit_loss), 0) / 100.0)::numeric, 4) AS profit_loss_units,
           MAX(entry_timestamp) AS latest_entry_timestamp
-        FROM real_paper_snapshots
+        FROM canonical
         GROUP BY sport_slug, league_slug, model_name, market_type, line
         ORDER BY latest_entry_timestamp DESC NULLS LAST, total DESC;
       `
     );
 
+    const excluded = await db.query(
+      `
+        SELECT
+          COUNT(*) FILTER (WHERE status IN ('WIN', 'LOSS', 'PUSH', 'SETTLED'))::int AS legacy_all_closed,
+          COUNT(*) FILTER (
+            WHERE status IN ('WIN', 'LOSS', 'PUSH', 'SETTLED')
+              AND duplicate_of_id IS NULL
+              AND COALESCE(data_state, 'FRESH') <> 'DUPLICATE'
+              AND COALESCE(raw_data->>'clean_v2_eligible', 'false') <> 'true'
+          )::int AS canonical_legacy_closed,
+          COUNT(*) FILTER (WHERE duplicate_of_id IS NOT NULL OR COALESCE(data_state, 'FRESH') = 'DUPLICATE')::int AS duplicate_excluded,
+          COUNT(*) FILTER (WHERE COALESCE(raw_data->>'audit_only', 'false') = 'true')::int AS audit_only
+        FROM real_paper_snapshots;
+      `
+    );
+    const rows = result.rows;
     return {
       count: result.rows.length,
-      real_paper: result.rows
+      real_paper: rows,
+      summary: {
+        clean_v2_closed: rows.reduce((sum, row) => sum + Number(row.clean_v2_closed || 0), 0),
+        legacy_only_closed: rows.reduce((sum, row) => sum + Number(row.legacy_only_closed || 0), 0),
+        legacy_all_closed: Number(excluded.rows[0]?.legacy_all_closed || 0),
+        canonical_legacy_closed: Number(excluded.rows[0]?.canonical_legacy_closed || 0),
+        duplicate_excluded: Number(excluded.rows[0]?.duplicate_excluded || 0),
+        audit_only: Number(excluded.rows[0]?.audit_only || 0),
+        profit_unit_definition: "1u = PAPER_BANKROLL_BASE * 1% (profit_loss stored in bankroll currency and divided by 100 for units)"
+      }
     };
   });
 

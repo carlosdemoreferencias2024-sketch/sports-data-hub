@@ -68,6 +68,13 @@ function timestampGapSeconds(a: unknown, b: unknown) {
   return Math.round(Math.abs(left.getTime() - right.getTime()) / 1000);
 }
 
+function timestampLagSeconds(reference: unknown, candidate: unknown) {
+  const left = parseDate(reference);
+  const right = parseDate(candidate);
+  if (!left || !right) return null;
+  return Math.round((left.getTime() - right.getTime()) / 1000);
+}
+
 function evBucket(ev: number): HighEvAudit["ev_bucket"] {
   if (ev >= 0.40) return "EV_40_PLUS";
   if (ev >= 0.25) return "EV_25_40";
@@ -87,6 +94,7 @@ export function auditHighEvDuplicate(input: HighEvAuditInput): HighEvAudit {
   const openExposure = numeric(input.open_exposure_count);
   const grade = String(input.edge_quality_grade || input.grade || "").toUpperCase();
   const timestampGap = timestampGapSeconds(input.entry_timestamp, input.latest_snapshot_at);
+  const snapshotLag = timestampLagSeconds(input.entry_timestamp, input.latest_snapshot_at);
   const implied = odds > 1 ? 1 / odds : null;
   const flags: string[] = [];
 
@@ -94,7 +102,7 @@ export function auditHighEvDuplicate(input: HighEvAuditInput): HighEvAudit {
   if (ev > 0.60) flags.push("odds_outlier_ev_gt_60");
   else if (ev > 0.40) flags.push("extreme_ev_gt_40");
   else if (ev > 0.25) flags.push("high_ev_gt_25");
-  if (timestampGap !== null && timestampGap > 6 * 60 * 60) flags.push("timestamp_gap_gt_6h");
+  if (snapshotLag !== null && snapshotLag > 6 * 60 * 60) flags.push("timestamp_gap_gt_6h");
   if (lineAgeSeconds > 24 * 60 * 60 || input.is_stale === true) flags.push("stale_line");
   if (providerScore < 80) flags.push("provider_score_below_80");
   if (input.suspicious_move === true) flags.push("suspicious_move");

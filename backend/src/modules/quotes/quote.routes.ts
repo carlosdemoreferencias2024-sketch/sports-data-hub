@@ -51,7 +51,7 @@ const providerScorecardQuerySchema = z.object({
 });
 
 type NormalizedSnapshotSelection = {
-  selection: "home" | "away" | "draw" | "over" | "under" | "yes" | "no";
+  selection: "home" | "away" | "draw" | "over" | "under" | "yes" | "no" | "home_draw" | "home_away" | "draw_away";
   odds: number;
 };
 
@@ -70,12 +70,16 @@ function snapshotRole(providerName: string, rawData: Record<string, unknown> | u
 
 function snapshotSelections(quote: z.infer<typeof quoteSchema>): NormalizedSnapshotSelection[] {
   const marketType = quote.market_type.toLowerCase();
-  const homeSelection = marketType.startsWith("total_")
+  const homeSelection = marketType === "double_chance"
+    ? "home_draw"
+    : marketType.startsWith("total_")
     ? "over"
     : marketType === "btts"
       ? "yes"
       : "home";
-  const awaySelection = marketType.startsWith("total_")
+  const awaySelection = marketType === "double_chance"
+    ? "draw_away"
+    : marketType.startsWith("total_")
     ? "under"
     : marketType === "btts"
       ? "no"
@@ -89,7 +93,7 @@ function snapshotSelections(quote: z.infer<typeof quoteSchema>): NormalizedSnaps
     selections.push({ selection: awaySelection, odds: quote.away_odds });
   }
   if (quote.draw_odds !== null && quote.draw_odds !== undefined) {
-    selections.push({ selection: "draw", odds: quote.draw_odds });
+    selections.push({ selection: marketType === "double_chance" ? "home_away" : "draw", odds: quote.draw_odds });
   }
 
   return selections;
@@ -142,7 +146,37 @@ export async function quoteRoutes(app: FastifyInstance) {
     for (const quote of body.quotes) {
       const result = await db.query(
         `
-          WITH latest AS (
+          WITH exact_existing AS (
+            SELECT id
+            FROM market_quotes
+            WHERE match_id = $1
+              AND provider_name = $2
+              AND market_type = $3
+              AND line IS NOT DISTINCT FROM $4::numeric
+              AND home_odds IS NOT DISTINCT FROM $5::numeric
+              AND away_odds IS NOT DISTINCT FROM $6::numeric
+              AND draw_odds IS NOT DISTINCT FROM $7::numeric
+              AND NOT $10::boolean
+            ORDER BY COALESCE(last_seen_at, captured_at) DESC
+            LIMIT 1
+          ),
+          refreshed AS (
+            UPDATE market_quotes mq
+            SET captured_at = GREATEST(mq.captured_at, COALESCE($8::timestamptz, NOW())),
+                first_seen_at = COALESCE(mq.first_seen_at, mq.captured_at),
+                last_seen_at = GREATEST(COALESCE(mq.last_seen_at, mq.captured_at), COALESCE($8::timestamptz, NOW())),
+                seen_count = GREATEST(COALESCE(mq.seen_count, 1), 1) + 1,
+                raw_data = mq.raw_data
+                  || jsonb_build_object(
+                    'last_seen_raw_data', $9::jsonb,
+                    'last_seen_at', COALESCE($8::timestamptz, NOW()),
+                    'dedupe_guard', 'market_quote_exact_reuse_v1'
+                  )
+            FROM exact_existing ee
+            WHERE mq.id = ee.id
+            RETURNING mq.id, mq.captured_at, TRUE AS reused
+          ),
+          latest AS (
             SELECT home_odds, away_odds, draw_odds
             FROM market_quotes
             WHERE match_id = $1
@@ -151,20 +185,34 @@ export async function quoteRoutes(app: FastifyInstance) {
               AND line IS NOT DISTINCT FROM $4::numeric
             ORDER BY captured_at DESC
             LIMIT 1
-          )
+          ),
+          inserted AS (
           INSERT INTO market_quotes (
             match_id, provider_name, market_type, line, home_odds, away_odds,
-            draw_odds, captured_at, raw_data
+            draw_odds, captured_at, raw_data, first_seen_at, last_seen_at, seen_count
           )
-          SELECT $1, $2, $3, $4, $5, $6, $7, COALESCE($8::timestamptz, NOW()), $9
-          WHERE $10::boolean OR NOT EXISTS (
+          SELECT
+            $1, $2, $3, $4, $5, $6, $7,
+            COALESCE($8::timestamptz, NOW()),
+            $9,
+            COALESCE($8::timestamptz, NOW()),
+            COALESCE($8::timestamptz, NOW()),
+            1
+          WHERE NOT EXISTS (SELECT 1 FROM refreshed)
+            AND (
+              $10::boolean OR NOT EXISTS (
             SELECT 1
             FROM latest
             WHERE home_odds IS NOT DISTINCT FROM $5::numeric
               AND away_odds IS NOT DISTINCT FROM $6::numeric
               AND draw_odds IS NOT DISTINCT FROM $7::numeric
+              )
           )
-          RETURNING id, captured_at;
+          RETURNING id, captured_at, FALSE AS reused
+          )
+          SELECT * FROM refreshed
+          UNION ALL
+          SELECT * FROM inserted;
         `,
         [
           quote.match_id,
@@ -179,10 +227,11 @@ export async function quoteRoutes(app: FastifyInstance) {
           quote.force_insert
         ]
       );
-      inserted += result.rowCount ?? 0;
-      unchanged += result.rowCount ? 0 : 1;
+      const quoteRow = result.rows[0];
+      inserted += quoteRow && !quoteRow.reused ? 1 : 0;
+      unchanged += quoteRow?.reused || !quoteRow ? 1 : 0;
 
-      const insertedQuote = result.rows[0];
+      const insertedQuote = quoteRow;
       if (insertedQuote) {
         const capturedAt = new Date(insertedQuote.captured_at);
         const role = snapshotRole(quote.provider_name, quote.raw_data);
@@ -217,7 +266,16 @@ export async function quoteRoutes(app: FastifyInstance) {
               JOIN leagues l ON l.id = m.league_id
               JOIN sports s ON s.id = l.sport_id
               WHERE m.id = $2
-              ON CONFLICT (market_quote_id, selection) WHERE market_quote_id IS NOT NULL DO NOTHING;
+              ON CONFLICT (market_quote_id, selection) WHERE market_quote_id IS NOT NULL DO UPDATE SET
+                captured_at = GREATEST(odds_snapshots.captured_at, EXCLUDED.captured_at),
+                received_at = NOW(),
+                quality_score = EXCLUDED.quality_score,
+                quality_flags = EXCLUDED.quality_flags,
+                raw_data = odds_snapshots.raw_data
+                  || jsonb_build_object(
+                    'last_seen_raw_data', EXCLUDED.raw_data,
+                    'dedupe_guard', 'odds_snapshot_exact_reuse_v1'
+                  );
             `,
             [
               insertedQuote.id,

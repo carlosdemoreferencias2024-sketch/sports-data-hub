@@ -45,3 +45,25 @@ Cloudflare no reemplaza los guardrails internos:
 - Kelly apagado
 - Telegram automatico apagado
 - `REAL_CANDIDATE = 0`
+
+## Archivo ejemplo
+
+Se agrego `deploy/cloudflare/config.example.yml` como referencia para un tunnel administrado por archivo.
+
+Para el flujo recomendado con token desde Docker Compose, basta con crear el tunnel en Cloudflare Zero Trust y guardar el token en `.env`:
+
+```env
+CLOUDFLARE_TUNNEL_TOKEN=...
+```
+
+Luego iniciar el perfil `edge`:
+
+```bash
+docker compose --profile edge up -d cloudflared
+```
+
+El servicio interno recomendado es:
+
+```text
+http://engine-node:3000
+```

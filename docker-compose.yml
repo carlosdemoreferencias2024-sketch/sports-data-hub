@@ -5,8 +5,9 @@ services:
     build:
       context: ./backend
     container_name: data_hub_engine
+    restart: unless-stopped
     environment:
-      NODE_ENV: development
+      NODE_ENV: ${NODE_ENV:-development}
       PORT: 3000
       HOST: 0.0.0.0
       DATABASE_URL: postgres://${POSTGRES_USER:-sports_admin}:${POSTGRES_PASSWORD:-sports_dev_password}@db-postgres:5432/${POSTGRES_DB:-sports_db}
@@ -15,8 +16,15 @@ services:
       API_KEY: ${API_KEY:-dev_internal_api_key}
       RATE_LIMIT_MAX: 60
       RATE_LIMIT_WINDOW: 1 minute
+      API_FOOTBALL_KEY: ${API_FOOTBALL_KEY:-}
+      API_FOOTBALL_BASE_URL: ${API_FOOTBALL_BASE_URL:-https://v3.football.api-sports.io}
+      API_FOOTBALL_DAILY_LIMIT: ${API_FOOTBALL_DAILY_LIMIT:-100}
+      API_FOOTBALL_RATE_LIMIT_PER_MINUTE: ${API_FOOTBALL_RATE_LIMIT_PER_MINUTE:-10}
+      API_FOOTBALL_CACHE_HOURS: ${API_FOOTBALL_CACHE_HOURS:-6}
     ports:
-      - "4000:3000"
+      - "${ENGINE_BIND_ADDRESS:-0.0.0.0}:${ENGINE_HOST_PORT:-4000}:3000"
+    volumes:
+      - ./backend/uploads:/app/uploads
     depends_on:
       db-postgres:
         condition: service_healthy
@@ -33,12 +41,13 @@ services:
   db-postgres:
     image: postgres:16-alpine
     container_name: data_hub_db
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-sports_admin}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sports_dev_password}
       POSTGRES_DB: ${POSTGRES_DB:-sports_db}
     ports:
-      - "5433:5432"
+      - "${POSTGRES_BIND_ADDRESS:-0.0.0.0}:${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - data_hub_postgres_data:/var/lib/postgresql/data
       - ./database/schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
@@ -55,8 +64,9 @@ services:
   cache-redis:
     image: redis:7-alpine
     container_name: data_hub_redis
+    restart: unless-stopped
     ports:
-      - "6380:6379"
+      - "${REDIS_BIND_ADDRESS:-0.0.0.0}:${REDIS_HOST_PORT:-6380}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -68,6 +78,7 @@ services:
   scraper-soccer:
     image: python:3.12-slim
     container_name: data_hub_scraper_soccer
+    restart: unless-stopped
     working_dir: /app
     volumes:
       - ./workers:/app
@@ -97,6 +108,7 @@ services:
   scraper-mlb:
     image: python:3.12-slim
     container_name: data_hub_scraper_mlb
+    restart: unless-stopped
     working_dir: /app
     volumes:
       - ./workers:/app
@@ -206,6 +218,83 @@ services:
     networks:
       - data_hub_network
 
+  sports-research-worker:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile.odds
+    container_name: data_hub_sports_research_worker
+    profiles:
+      - research
+    working_dir: /app
+    command: python sports_research_worker.py
+    volumes:
+      - ./scripts:/scripts:ro
+      - ./workers/research_payloads:/research-payloads:ro
+    environment:
+      HUB_BASE_URL: http://engine-node:3000
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev_internal_api_key}
+      SPORTS_RESEARCH_INTERVAL_SECONDS: ${SPORTS_RESEARCH_INTERVAL_SECONDS:-1800}
+      SPORTS_RESEARCH_HEALTH_PORT: 8080
+      SPORTS_RESEARCH_DRY_RUN: ${SPORTS_RESEARCH_DRY_RUN:-true}
+      SPORTS_RESEARCH_AUTO_CONSENSUS: ${SPORTS_RESEARCH_AUTO_CONSENSUS:-true}
+      SPORTS_RESEARCH_PAYLOAD_DIRS: ${SPORTS_RESEARCH_PAYLOAD_DIRS:-/research-payloads,/scripts}
+      SPORTS_RESEARCH_FILE_GLOBS: ${SPORTS_RESEARCH_FILE_GLOBS:-sports_research_*.json,football_hydrate*.json,historical_intelligence*.json}
+      SPORTS_RESEARCH_MAX_FILES: ${SPORTS_RESEARCH_MAX_FILES:-25}
+      WORKER_HTTP_MAX_RETRIES: ${WORKER_HTTP_MAX_RETRIES:-4}
+      WORKER_HTTP_BACKOFF_BASE_SECONDS: ${WORKER_HTTP_BACKOFF_BASE_SECONDS:-15}
+      WORKER_HTTP_BACKOFF_MAX_SECONDS: ${WORKER_HTTP_BACKOFF_MAX_SECONDS:-300}
+    depends_on:
+      engine-node:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - data_hub_network
+
+  sports-context-incremental-worker:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile.odds
+    container_name: data_hub_sports_context_incremental_worker
+    profiles:
+      - research
+    working_dir: /app
+    command: python sports_context_incremental_worker.py
+    environment:
+      HUB_BASE_URL: http://engine-node:3000
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev_internal_api_key}
+      SPORTS_CONTEXT_INCREMENTAL_INTERVAL_SECONDS: ${SPORTS_CONTEXT_INCREMENTAL_INTERVAL_SECONDS:-900}
+      SPORTS_CONTEXT_INCREMENTAL_HEALTH_PORT: 8081
+      SPORTS_CONTEXT_INCREMENTAL_DRY_RUN: ${SPORTS_CONTEXT_INCREMENTAL_DRY_RUN:-true}
+      SPORTS_CONTEXT_INCREMENTAL_NEAR_KICKOFF: ${SPORTS_CONTEXT_INCREMENTAL_NEAR_KICKOFF:-true}
+      SPORTS_CONTEXT_INCREMENTAL_LOOKAHEAD_HOURS: ${SPORTS_CONTEXT_INCREMENTAL_LOOKAHEAD_HOURS:-6}
+      SPORTS_CONTEXT_INCREMENTAL_LOOKBACK_MINUTES: ${SPORTS_CONTEXT_INCREMENTAL_LOOKBACK_MINUTES:-30}
+      SPORTS_CONTEXT_INCREMENTAL_MAX_MATCHES: ${SPORTS_CONTEXT_INCREMENTAL_MAX_MATCHES:-20}
+      SPORTS_CONTEXT_INCREMENTAL_MAX_API_REQUESTS: ${SPORTS_CONTEXT_INCREMENTAL_MAX_API_REQUESTS:-10}
+      SPORTS_CONTEXT_INCREMENTAL_SKIP_IF_KICKOFF_PASSED: ${SPORTS_CONTEXT_INCREMENTAL_SKIP_IF_KICKOFF_PASSED:-true}
+      SPORTS_CONTEXT_INCREMENTAL_ONLY_REBUILD_WHEN_CHANGED: ${SPORTS_CONTEXT_INCREMENTAL_ONLY_REBUILD_WHEN_CHANGED:-false}
+      SPORTS_CONTEXT_INCREMENTAL_INCLUDE_OBSERVATION_ONLY: ${SPORTS_CONTEXT_INCREMENTAL_INCLUDE_OBSERVATION_ONLY:-false}
+      SPORTS_CONTEXT_INCREMENTAL_TARGET_STATUSES: ${SPORTS_CONTEXT_INCREMENTAL_TARGET_STATUSES:-PARTIAL_CONTEXT_REVIEW,CONTEXT_GAPS,FOOTBALL_CONTEXT_GAPS,BLOCK_CONFIRMATION}
+      SPORTS_CONTEXT_INCREMENTAL_CONSENSUS_TYPES: ${SPORTS_CONTEXT_INCREMENTAL_CONSENSUS_TYPES:-fixture,kickoff,lineup,injuries,team_stats,player_stats}
+      WORKER_HTTP_MAX_RETRIES: ${WORKER_HTTP_MAX_RETRIES:-4}
+      WORKER_HTTP_BACKOFF_BASE_SECONDS: ${WORKER_HTTP_BACKOFF_BASE_SECONDS:-15}
+      WORKER_HTTP_BACKOFF_MAX_SECONDS: ${WORKER_HTTP_BACKOFF_MAX_SECONDS:-300}
+    depends_on:
+      engine-node:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - data_hub_network
+
   analytics-bot:
     build:
       context: ./analytics
@@ -241,11 +330,26 @@ services:
       MB_DB_FILE: /metabase-data/metabase.db
       JAVA_TIMEZONE: ${METABASE_TIMEZONE:-America/Matamoros}
     ports:
-      - "${METABASE_PORT:-3001}:3000"
+      - "${METABASE_BIND_ADDRESS:-0.0.0.0}:${METABASE_PORT:-3001}:3000"
     volumes:
       - data_hub_metabase_data:/metabase-data
     depends_on:
       db-postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - data_hub_network
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: data_hub_cloudflared
+    profiles:
+      - edge
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    environment:
+      CLOUDFLARE_TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      engine-node:
         condition: service_healthy
     restart: unless-stopped
     networks:

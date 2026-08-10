@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import os
+from zoneinfo import ZoneInfo
 
 
 @dataclass(frozen=True)
@@ -18,11 +19,15 @@ def _env_flag(name: str, default: bool) -> bool:
     return value.lower() in {"1", "true", "yes", "on"}
 
 
+def _trading_timezone() -> ZoneInfo:
+    return ZoneInfo(os.getenv("TRADING_TIME_ZONE", "America/Matamoros"))
+
+
 def _target_date() -> str:
     configured = os.getenv("PREBET_TARGET_DATE")
     if configured:
         return configured.strip()[:10]
-    return datetime.now(timezone.utc).date().isoformat()
+    return datetime.now(_trading_timezone()).date().isoformat()
 
 
 def _parse_datetime(value) -> datetime | None:
@@ -52,7 +57,7 @@ def validate_mlb_fixture(
     if parsed_date is None:
         return ValidationResult(False, "INVALID_DATE")
 
-    if strict and parsed_date.date().isoformat() != _target_date():
+    if strict and parsed_date.astimezone(_trading_timezone()).date().isoformat() != _target_date():
         return ValidationResult(False, "INVALID_DATE")
 
     if not (home_team or "").strip() or not (away_team or "").strip():

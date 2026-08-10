@@ -7,7 +7,12 @@
     "dev": "tsc -w -p tsconfig.json",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
-    "test": "node scripts/test-audit-guardrails.mjs"
+    "test": "node scripts/test-audit-guardrails.mjs",
+    "test:closing-window": "node scripts/test-closing-window.mjs",
+    "test:source-capture-assistant": "node scripts/test-source-capture-assistant.mjs",
+    "check:live-safe-mode": "node scripts/check-live-safe-mode.mjs",
+    "test:safety": "node scripts/run-safety-suite.mjs",
+    "backfill:closing-diagnostics": "node scripts/backfill-closing-diagnostics.mjs"
   },
   "dependencies": {
     "@fastify/rate-limit": "^10.3.0",

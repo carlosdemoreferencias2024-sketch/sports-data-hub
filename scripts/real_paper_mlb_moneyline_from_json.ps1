@@ -97,7 +97,8 @@ function Normalize-Quote {
 }
 
 $json = Get-Content -LiteralPath $resolvedInput -Raw | ConvertFrom-Json
-$items = if ($json.quotes) { @($json.quotes) } else { @($json) }
+$itemsSource = if ($json.quotes) { $json.quotes } else { $json }
+[object[]]$items = @($itemsSource)
 if ($items.Count -lt 1) {
   throw "El archivo no contiene cuotas."
 }

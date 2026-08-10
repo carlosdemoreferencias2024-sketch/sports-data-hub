@@ -1,0 +1,7 @@
+tunnel: sports-data-hub
+credentials-file: /etc/cloudflared/sports-data-hub.json
+
+ingress:
+  - hostname: sports.example.com
+    service: http://engine-node:3000
+  - service: http_status:404

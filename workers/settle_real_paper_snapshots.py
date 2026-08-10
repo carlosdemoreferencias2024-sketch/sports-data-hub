@@ -1,9 +1,17 @@
 import argparse
+import json
 import os
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import psycopg
 
+from market_integrity_policy import (
+    validate_clean_sample_eligibility,
+    validate_closing_snapshot,
+    validate_entry_snapshot,
+    validate_settlement_eligibility,
+)
 from settle_paper_trades import settle_selection
 
 
@@ -30,8 +38,84 @@ def _pick_column(selection: str) -> str | None:
     return None
 
 
-def settle_pending(limit: int, dry_run: bool, require_closing: bool) -> dict[str, int]:
-    counts = {"checked": 0, "settled": 0, "pending_results": 0, "unsupported": 0, "missing_closing": 0}
+def _result_source_verified(raw_data) -> bool:
+    if not isinstance(raw_data, dict):
+        return False
+    values = [
+        raw_data.get("source"),
+        raw_data.get("source_name"),
+        raw_data.get("source_match_id"),
+        raw_data.get("provider_name"),
+    ]
+    source = " ".join(str(value or "").lower() for value in values)
+    return any(token in source for token in ("mlb_stats", "mlb.com", "mlb_official", "espn-mlb", "manual_verified"))
+
+
+def _mark_blocked(conn, snapshot_id, status: str, reasons: list[str], dry_run: bool) -> None:
+    if dry_run:
+        return
+    conn.execute(
+        """
+        UPDATE real_paper_snapshots
+        SET status = 'PENDING_CLOSING',
+            raw_data = COALESCE(raw_data, '{}'::jsonb) || jsonb_build_object(
+              'clean_chain_version', 'v2',
+              'settlement_status', %s,
+              'settlement_block_reasons', %s::jsonb,
+              'clv_valid', false,
+              'clean_v2_eligible', false,
+              'audit_only', true
+            ),
+            updated_at = NOW()
+        WHERE id = %s;
+        """,
+        (status, json.dumps(reasons), snapshot_id),
+    )
+
+
+def _closing_context_snapshot(raw_data, closing_odds, clv, result: str) -> dict:
+    source = raw_data if isinstance(raw_data, dict) else {}
+    feature_set = source.get("feature_set") if isinstance(source.get("feature_set"), dict) else {}
+    return {
+        "snapshot_type": "immutable_closing_context",
+        "captured_at": datetime.now(UTC).isoformat(),
+        "result": result,
+        "closing_odds": round(_float(closing_odds), 4),
+        "clv": round(float(clv), 6),
+        "pitchers_at_close": {
+            "home_pitcher_id": feature_set.get("home_pitcher_id"),
+            "away_pitcher_id": feature_set.get("away_pitcher_id"),
+            "home_pitcher_status": feature_set.get("home_pitcher_status"),
+            "away_pitcher_status": feature_set.get("away_pitcher_status"),
+            "pitcher_team_mapping_valid": feature_set.get("pitcher_team_mapping_valid"),
+        },
+        "lineup_status_at_close": feature_set.get("lineup_status"),
+        "batting_order_complete_at_close": feature_set.get("batting_order_complete"),
+        "bullpen_fatigue_at_close": {
+            "home": feature_set.get("home_bullpen_fatigue_score"),
+            "away": feature_set.get("away_bullpen_fatigue_score"),
+            "home_context_fresh": feature_set.get("home_bullpen_context_fresh"),
+            "away_context_fresh": feature_set.get("away_bullpen_context_fresh"),
+        },
+        "rest_context_at_close": {
+            "home_rest_days": feature_set.get("home_rest_days"),
+            "away_rest_days": feature_set.get("away_rest_days"),
+            "travel_rest_context_complete": feature_set.get("travel_rest_context_complete"),
+            "doubleheader_status": feature_set.get("doubleheader_status"),
+        },
+        "feature_completeness": feature_set.get("feature_completeness"),
+        "missing_context_at_close": feature_set.get("missing_context", []),
+        "decision_state_at_close": source.get("decision_status") or source.get("final_chain_status") or source.get("status"),
+        "scheduled_start": feature_set.get("scheduled_start"),
+        "provider_observed_at": feature_set.get("provider_observed_at"),
+        "minutes_before_start": feature_set.get("minutes_before_start"),
+        "post_kickoff_observation": feature_set.get("post_kickoff_observation"),
+        "audit_only_context": feature_set.get("audit_only_context"),
+    }
+
+
+def settle_pending(limit: int, dry_run: bool, require_closing: bool = True) -> dict[str, int]:
+    counts = {"checked": 0, "settled": 0, "pending_results": 0, "unsupported": 0, "missing_closing": 0, "invalid_entry": 0, "unverified_result": 0}
     with psycopg.connect(DATABASE_URL) as conn:
         rows = conn.execute(
             """
@@ -49,6 +133,10 @@ def settle_pending(limit: int, dry_run: bool, require_closing: bool) -> dict[str
               COALESCE(finished_match.home_score, m.home_score) AS home_score,
               COALESCE(finished_match.away_score, m.away_score) AS away_score,
               COALESCE(finished_match.id, m.id) AS settlement_match_id,
+              COALESCE(finished_match.match_date, m.match_date) AS official_kickoff,
+              COALESCE(finished_match.raw_data, m.raw_data) AS result_raw_data,
+              COALESCE(finished_match.status::text, m.status::text) AS result_status,
+              rps.raw_data,
               CASE WHEN finished_match.id IS NOT NULL AND finished_match.id <> m.id THEN TRUE ELSE FALSE END AS logical_fallback
             FROM (
               SELECT rps.*, mk.provider_name
@@ -63,7 +151,7 @@ def settle_pending(limit: int, dry_run: bool, require_closing: bool) -> dict[str
               ON trade_away.match_id = m.id
              AND trade_away.home_away = 'away'
             LEFT JOIN LATERAL (
-              SELECT fm.id, fm.home_score, fm.away_score
+              SELECT fm.id, fm.home_score, fm.away_score, fm.match_date, fm.raw_data, fm.status
               FROM matches fm
               JOIN match_competitors final_home
                 ON final_home.match_id = fm.id
@@ -108,6 +196,10 @@ def settle_pending(limit: int, dry_run: bool, require_closing: bool) -> dict[str
                 home_score,
                 away_score,
                 settlement_match_id,
+                official_kickoff,
+                result_raw_data,
+                result_status,
+                raw_data,
                 logical_fallback,
             ) = row
 
@@ -130,77 +222,102 @@ def settle_pending(limit: int, dry_run: bool, require_closing: bool) -> dict[str
                     conn.execute("UPDATE real_paper_snapshots SET status = 'PENDING_RESULTS' WHERE id = %s", (snapshot_id,))
                 continue
 
-            odds_column = _pick_column(str(pick))
-            closing_odds = None
-            closing_source = "latest_market_quote_after_entry_same_provider_bookmaker"
-            if odds_column is not None:
-                closing_row = conn.execute(
-                    f"""
-                    SELECT {odds_column}
-                    FROM market_quotes
-                    WHERE match_id = %s
-                      AND provider_name = %s
-                      AND market_type = %s
-                      AND line IS NOT DISTINCT FROM %s::numeric
-                      AND COALESCE(raw_data->>'bookmaker', '') = %s
-                      AND {odds_column} IS NOT NULL
-                      AND captured_at > %s
-                    ORDER BY captured_at DESC
-                    LIMIT 1;
-                    """,
-                    (match_id, provider_name, market_type, line, bookmaker, entry_timestamp),
-                ).fetchone()
-                closing_odds = closing_row[0] if closing_row else None
-                if closing_odds is None and str(provider_name) == "sportsdataio_trial":
-                    # SportsDataIO trial masks sportsbook ids, and the selected book can
-                    # drift between entry and closing snapshots. For CLV tracking, accept
-                    # the latest same-provider price instead of leaving finished games stuck.
-                    closing_row = conn.execute(
-                        f"""
-                        SELECT {odds_column}
-                        FROM market_quotes
-                        WHERE match_id = %s
-                          AND provider_name = %s
-                          AND market_type = %s
-                          AND line IS NOT DISTINCT FROM %s::numeric
-                          AND {odds_column} IS NOT NULL
-                          AND captured_at > %s
-                        ORDER BY captured_at DESC
-                        LIMIT 1;
-                        """,
-                        (match_id, provider_name, market_type, line, entry_timestamp),
-                    ).fetchone()
-                    closing_odds = closing_row[0] if closing_row else None
-                    if closing_odds is not None:
-                        closing_source = "latest_market_quote_after_entry_same_provider_sportsdataio_book_fallback"
+            entry_row = conn.execute(
+                """
+                SELECT captured_at, source_name, raw_data->>'evidence_id',
+                       raw_data->>'screenshot_sha256',
+                       COALESCE(raw_data->>'snapshot_type', snapshot_role),
+                       raw_data->>'stale_status',
+                       COALESCE((raw_data->>'safe_for_entry')::boolean, false),
+                       COALESCE((raw_data->>'canonical_match')::boolean, false),
+                       COALESCE((raw_data->>'duplicate')::boolean, false), id
+                FROM odds_snapshots
+                WHERE market_quote_id = (
+                    SELECT market_quote_id FROM real_paper_snapshots WHERE id = %s
+                )
+                  AND selection = %s
+                ORDER BY captured_at DESC
+                LIMIT 1;
+                """,
+                (snapshot_id, pick),
+            ).fetchone()
+            entry_integrity = validate_entry_snapshot({
+                "captured_at": entry_row[0] if entry_row else entry_timestamp,
+                "kickoff": official_kickoff,
+                "source_name": entry_row[1] if entry_row else provider_name,
+                "evidence_id": entry_row[2] if entry_row else None,
+                "screenshot_sha256": entry_row[3] if entry_row else None,
+                "snapshot_type": entry_row[4] if entry_row else None,
+                "stale_status": entry_row[5] if entry_row else None,
+                "safe_for_entry": entry_row[6] if entry_row else False,
+                "canonical_match": entry_row[7] if entry_row else False,
+                "duplicate": entry_row[8] if entry_row else False,
+            })
+            if not entry_integrity["eligible"]:
+                counts["invalid_entry"] += 1
+                _mark_blocked(conn, snapshot_id, "BLOCKED_INVALID_ENTRY", entry_integrity["reasons"], dry_run)
+                continue
 
-            if closing_odds is None:
+            closing_row = conn.execute(
+                """
+                SELECT odds, captured_at, source_name, raw_data->>'evidence_id',
+                       raw_data->>'screenshot_sha256',
+                       COALESCE(raw_data->>'snapshot_type', snapshot_role),
+                       COALESCE((raw_data->>'safe_for_closing')::boolean, false),
+                       COALESCE((raw_data->>'canonical_match')::boolean, false),
+                       COALESCE((raw_data->>'duplicate')::boolean, false), id,
+                       COALESCE(bookmaker, raw_data->>'bookmaker')
+                FROM odds_snapshots
+                WHERE match_id = %s
+                  AND market_type = %s
+                  AND line IS NOT DISTINCT FROM %s::numeric
+                  AND selection = %s
+                  AND COALESCE(raw_data->>'snapshot_type', snapshot_role) = 'closing'
+                ORDER BY captured_at DESC
+                LIMIT 1;
+                """,
+                (match_id, market_type, line, pick),
+            ).fetchone()
+            closing_integrity = validate_closing_snapshot({
+                "captured_at": closing_row[1] if closing_row else None,
+                "kickoff": official_kickoff,
+                "source_name": closing_row[2] if closing_row else None,
+                "evidence_id": closing_row[3] if closing_row else None,
+                "screenshot_sha256": closing_row[4] if closing_row else None,
+                "snapshot_type": closing_row[5] if closing_row else None,
+                "safe_for_closing": closing_row[6] if closing_row else False,
+                "canonical_match": closing_row[7] if closing_row else False,
+                "duplicate": closing_row[8] if closing_row else False,
+            })
+            if not closing_integrity["eligible"]:
                 counts["missing_closing"] += 1
-                if require_closing:
-                    if not dry_run:
-                        conn.execute(
-                            """
-                            UPDATE real_paper_snapshots
-                            SET status = 'PENDING_CLOSING',
-                                raw_data = COALESCE(raw_data, '{}'::jsonb) || jsonb_build_object(
-                                  'closing_odds_source', 'missing_quote_after_entry',
-                                  'closing_required', true
-                                )
-                            WHERE id = %s;
-                            """,
-                            (snapshot_id,),
-                        )
-                    print(
-                        f"[REAL-PAPER-SETTLE] snapshot={snapshot_id} missing_closing "
-                        f"entry={_float(entry_odds):.4f} require_closing=True"
-                    )
-                    continue
-                closing_odds = entry_odds
+                _mark_blocked(conn, snapshot_id, "BLOCKED_MISSING_VALID_CLOSING", closing_integrity["reasons"], dry_run)
+                print(f"[REAL-PAPER-SETTLE] snapshot={snapshot_id} blocked closing={closing_integrity['reasons']}")
+                continue
+
+            result_verified = str(result_status) == "finished" and _result_source_verified(result_raw_data)
+            settlement_integrity = validate_settlement_eligibility(
+                entry_integrity,
+                closing_integrity,
+                result_final=str(result_status) == "finished",
+                result_source_verified=result_verified,
+            )
+            if not settlement_integrity["eligible"]:
+                counts["unverified_result"] += 1
+                _mark_blocked(conn, snapshot_id, "BLOCKED_UNVERIFIED_RESULT", settlement_integrity["reasons"], dry_run)
+                continue
+
+            closing_odds = closing_row[0]
+            closing_source = "verified_closing_odds_snapshot"
 
             clv = (_float(entry_odds) - _float(closing_odds)) / _float(closing_odds)
             stake = BANKROLL_BASE * _float(stake_fraction)
             profit = stake * (_float(entry_odds) - 1.0) if result == "WIN" else -stake if result == "LOSS" else 0.0
             counts["settled"] += 1
+            context_snapshot = _closing_context_snapshot(raw_data, closing_odds, clv, result)
+            clean_integrity = validate_clean_sample_eligibility(
+                settlement_integrity, settlement_final=True, clv_valid=True
+            )
             fallback_note = f" fallback_match={settlement_match_id}" if logical_fallback else ""
             print(
                 f"[REAL-PAPER-SETTLE] snapshot={snapshot_id} result={result} "
@@ -222,7 +339,19 @@ def settle_pending(limit: int, dry_run: bool, require_closing: bool) -> dict[str
                           'settlement_logical_fallback', %s,
                           'settlement_home_score', %s,
                           'settlement_away_score', %s,
-                          'closing_odds_source', %s::text
+                          'closing_odds_source', %s::text,
+                          'closing_context_snapshot', %s::jsonb,
+                          'entry_snapshot_id', %s,
+                          'closing_snapshot_id', %s,
+                          'closing_evidence_id', %s,
+                          'closing_screenshot_sha256', %s,
+                          'closing_quality', %s,
+                          'result_source_verified', true,
+                          'settlement_final', true,
+                          'clv_valid', true,
+                          'clean_v2_eligible', %s,
+                          'clean_chain_version', 'v2',
+                          'audit_only', false
                         )
                     WHERE id = %s;
                     """,
@@ -237,6 +366,13 @@ def settle_pending(limit: int, dry_run: bool, require_closing: bool) -> dict[str
                         int(home_score),
                         int(away_score),
                         closing_source,
+                        json.dumps(context_snapshot, ensure_ascii=False),
+                        str(entry_row[9]),
+                        str(closing_row[9]),
+                        closing_row[3],
+                        closing_row[4],
+                        closing_integrity["closing_quality"],
+                        bool(clean_integrity["eligible"]),
                         snapshot_id,
                     ),
                 )
@@ -255,7 +391,8 @@ def main() -> None:
     parser.add_argument(
         "--require-closing",
         action="store_true",
-        help="No liquida si no existe una market_quote capturada despues de entry_timestamp.",
+        default=True,
+        help="Compatibilidad: closing verificado es obligatorio en Clean Chain v2.",
     )
     args = parser.parse_args()
     counts = settle_pending(args.limit, args.dry_run, args.require_closing)
@@ -263,7 +400,8 @@ def main() -> None:
         "[+] Real Paper settlement finalizado "
         f"checked={counts['checked']} settled={counts['settled']} "
         f"pending_results={counts['pending_results']} unsupported={counts['unsupported']} "
-        f"missing_closing={counts['missing_closing']} dry_run={args.dry_run}"
+        f"missing_closing={counts['missing_closing']} invalid_entry={counts['invalid_entry']} "
+        f"unverified_result={counts['unverified_result']} dry_run={args.dry_run}"
     )
 
 
