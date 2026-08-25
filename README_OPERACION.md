@@ -253,3 +253,15 @@ docker compose --profile odds exec -T odds-worker python optimizer.py --model-na
 ```
 
 Recomendacion operativa: acumular 20-50 predicciones cerradas por deporte/liga antes de ajustar pesos.
+
+## 14. Contrato operativo vigente
+
+El contrato vigente de futbol esta en `docs/FOOTBALL_TECHNICAL_CONTRACT.md` y prevalece sobre ejemplos historicos de este README.
+
+- No usar `--auto-paper` para saltar Candidate Preflight.
+- Kelly, dinero real, Telegram auto y autopost permanecen apagados.
+- Solo se permite un foco por deporte y ventana.
+- Ningun registro post-kickoff puede volver a clasificarse como pregame o clean-v2.
+- Validar el reloj con `scripts\get_dual_sport_clock_status.ps1 -Strict`.
+
+Las secciones Alpha y staking anteriores se conservan como referencia historica del prototipo; no son el flujo autorizado para futbol, MLB, NFL ni NBA.

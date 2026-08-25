@@ -297,7 +297,7 @@ export async function getFootballTeamIntelligence(db: Queryable) {
           CONCAT(home_team.name, ' vs ', away_team.name) AS match,
           'persisted' AS row_source
         FROM football_team_intelligence fti
-        LEFT JOIN matches m ON m.id = fti.match_id
+        LEFT JOIN v_valid_matches m ON m.id = fti.match_id
         LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
         LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
         LEFT JOIN match_competitors away_mc ON away_mc.match_id = m.id AND away_mc.home_away = 'away'
@@ -340,7 +340,7 @@ export async function getFootballTeamIntelligence(db: Queryable) {
           m.updated_at,
           CONCAT(home_team.name, ' vs ', away_team.name) AS match,
           'derived_observed' AS row_source
-        FROM matches m
+        FROM v_valid_matches m
         JOIN leagues l ON l.id = m.league_id
         LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
         LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
@@ -392,7 +392,7 @@ export async function getFootballPlayerIntelligence(db: Queryable) {
           CONCAT(home_team.name, ' vs ', away_team.name) AS match,
           'persisted' AS row_source
         FROM football_player_intelligence fpi
-        LEFT JOIN matches m ON m.id = fpi.match_id
+        LEFT JOIN v_valid_matches m ON m.id = fpi.match_id
         LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
         LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
         LEFT JOIN match_competitors away_mc ON away_mc.match_id = m.id AND away_mc.home_away = 'away'
@@ -430,7 +430,7 @@ export async function getFootballPlayerIntelligence(db: Queryable) {
           m.updated_at,
           CONCAT(home_team.name, ' vs ', away_team.name) AS match,
           'derived_lineup_pending' AS row_source
-        FROM matches m
+        FROM v_valid_matches m
         JOIN leagues l ON l.id = m.league_id
         LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
         LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
@@ -453,7 +453,7 @@ export async function getFootballPlayerIntelligence(db: Queryable) {
           m.raw_data, m.created_at, m.updated_at,
           CONCAT(home_team.name, ' vs ', away_team.name),
           'derived_lineup_pending'
-        FROM matches m
+        FROM v_valid_matches m
         JOIN leagues l ON l.id = m.league_id
         LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
         LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
@@ -586,7 +586,7 @@ export async function getFootballConfirmedPickChain(db: Queryable) {
           COALESCE(lo.captured_at, m.match_date) AS placed_at,
           COALESCE(lo.raw_data, m.raw_data) AS raw_data,
           CASE WHEN lo.feed_status = 'SHADOW_CANDIDATE' THEN false ELSE true END AS observation_only
-        FROM matches m
+        FROM v_valid_matches m
         JOIN leagues l ON l.id = m.league_id
         LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
         LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
@@ -633,7 +633,7 @@ export async function getFootballConfirmedPickChain(db: Queryable) {
         latest_os.quality_score AS odds_quality_score,
         latest_os.raw_data AS odds_raw_data
       FROM picks p
-      LEFT JOIN matches m ON m.id = p.match_id
+      LEFT JOIN v_valid_matches m ON m.id = p.match_id
       LEFT JOIN football_competition_registry fcr ON fcr.league_id = p.league_id
       LEFT JOIN football_league_trust_scores ts ON ts.league_id = p.league_id
       LEFT JOIN latest_team lt ON lt.match_id = p.match_id

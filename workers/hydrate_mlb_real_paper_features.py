@@ -234,6 +234,7 @@ def hydrate_features(input_path: str, model_name: str, apply: bool, hydrate_snap
     updated_snapshots = 0
     duplicate_model_features_skipped = 0
     duplicate_snapshot_updates_skipped = 0
+    forecast_contexts_inserted = 0
     errors: list[dict[str, Any]] = []
     examples: list[dict[str, Any]] = []
 
@@ -260,7 +261,7 @@ def hydrate_features(input_path: str, model_name: str, apply: bool, hydrate_snap
                     errors.append({"line": line_number, "match_id": match_id, "reason": str(exc)})
                     continue
 
-                exists = conn.execute("SELECT 1 FROM matches WHERE id = %s LIMIT 1;", (match_id,)).fetchone()
+                exists = conn.execute("SELECT 1 FROM v_valid_matches WHERE id = %s LIMIT 1;", (match_id,)).fetchone()
                 if not exists:
                     skipped += 1
                     errors.append({"line": line_number, "match_id": match_id, "reason": "match_not_found"})
@@ -293,17 +294,115 @@ def hydrate_features(input_path: str, model_name: str, apply: bool, hydrate_snap
                     """,
                     (match_id, row_model_name, feature_fingerprint),
                 ).fetchone()
+                model_feature_id = None
                 if feature_exists:
                     duplicate_model_features_skipped += 1
+                    model_feature_id = conn.execute(
+                        """
+                        SELECT id
+                        FROM model_features
+                        WHERE match_id = %s
+                          AND sport_slug = 'baseball'
+                          AND model_name = %s
+                          AND feature_set->>'feature_fingerprint' = %s
+                        ORDER BY generated_at DESC
+                        LIMIT 1;
+                        """,
+                        (match_id, row_model_name, feature_fingerprint),
+                    ).fetchone()[0]
                 else:
-                    conn.execute(
+                    model_feature_id = conn.execute(
                         """
                         INSERT INTO model_features (match_id, sport_slug, model_name, feature_set)
-                        VALUES (%s, 'baseball', %s, %s::jsonb);
+                        VALUES (%s, 'baseball', %s, %s::jsonb)
+                        RETURNING id;
                         """,
                         (match_id, row_model_name, feature_json),
-                    )
+                    ).fetchone()[0]
                     inserted_model_features += 1
+
+                conn.execute("SELECT * FROM register_forecast_match(%s::uuid);", (match_id,))
+                lineup_confirmed = bool(feature_set.get("home_lineup_confirmed")) and bool(
+                    feature_set.get("away_lineup_confirmed")
+                )
+                batting_order_complete = bool(feature_set.get("batting_order_complete"))
+                pitchers_confirmed = bool(feature_set.get("probable_pitcher_home")) and bool(
+                    feature_set.get("probable_pitcher_away")
+                ) and bool(feature_set.get("pitcher_team_mapping_valid"))
+                bullpen_context_complete = bool(feature_set.get("home_bullpen_context_fresh")) and bool(
+                    feature_set.get("away_bullpen_context_fresh")
+                )
+                post_kickoff = bool(feature_set.get("post_kickoff_observation"))
+                complete_context = (
+                    feature_set.get("feature_completeness") == "complete"
+                    and lineup_confirmed
+                    and batting_order_complete
+                    and pitchers_confirmed
+                    and bullpen_context_complete
+                    and not post_kickoff
+                )
+                missing_context = feature_set.get("missing_context") or []
+                if not isinstance(missing_context, list):
+                    missing_context = [str(missing_context)] if str(missing_context).strip() else []
+                if complete_context:
+                    missing_context = []
+                else:
+                    if not lineup_confirmed:
+                        missing_context.append("official_lineups")
+                    if not batting_order_complete:
+                        missing_context.append("batting_order")
+                    if not pitchers_confirmed:
+                        missing_context.append("pitchers")
+                    if not bullpen_context_complete:
+                        missing_context.append("bullpen")
+                    if post_kickoff:
+                        missing_context.append("post_kickoff_observation")
+                captured_at = (
+                    feature_set.get("provider_observed_at")
+                    or feature_set.get("feature_verified_at")
+                    or feature_set.get("feature_hydrated_at")
+                )
+                context_result = conn.execute(
+                    """
+                    INSERT INTO forecast_context_snapshots (
+                      match_id, model_feature_id, captured_at, lineup_confirmed,
+                      batting_order_complete, pitchers_confirmed, bullpen_context_complete,
+                      goalkeeper_confirmed, injuries_json, weather_json, missing_fields_json,
+                      notes, completeness_flag, source_url, source_payload_hash, capture_mode,
+                      source_published_at, source_as_of_at, replay_verified_by,
+                      no_post_event_data_attested
+                    )
+                    SELECT
+                      %s::uuid, %s::uuid, COALESCE(%s::timestamptz, NOW()), %s, %s, %s, %s,
+                      true, '{}'::jsonb, NULL, %s::jsonb,
+                      'MLB near-start context bridged from verified model features', %s,
+                      %s, %s, 'LIVE_FORWARD', COALESCE(%s::timestamptz, NOW()),
+                      COALESCE(%s::timestamptz, NOW()), 'mlb_stats_api_near_start', %s
+                    WHERE NOT EXISTS (
+                      SELECT 1 FROM forecast_context_snapshots WHERE model_feature_id = %s::uuid
+                    )
+                    RETURNING id;
+                    """,
+                    (
+                        match_id,
+                        model_feature_id,
+                        captured_at,
+                        lineup_confirmed,
+                        batting_order_complete,
+                        pitchers_confirmed,
+                        bullpen_context_complete,
+                        json.dumps(sorted(set(missing_context))),
+                        "complete" if complete_context else "partial",
+                        feature_set.get("feature_source_url"),
+                        feature_fingerprint,
+                        captured_at,
+                        captured_at,
+                        not post_kickoff,
+                        model_feature_id,
+                    ),
+                ).fetchone()
+                if context_result:
+                    forecast_contexts_inserted += 1
 
                 if hydrate_snapshots:
                     result = conn.execute(
@@ -349,6 +448,7 @@ def hydrate_features(input_path: str, model_name: str, apply: bool, hydrate_snap
         "updated_snapshots": updated_snapshots,
         "duplicate_model_features_skipped": duplicate_model_features_skipped,
         "duplicate_snapshot_updates_skipped": duplicate_snapshot_updates_skipped,
+        "forecast_contexts_inserted": forecast_contexts_inserted,
         "errors": errors[:25],
         "examples": examples[:10],
         "guardrails": {

@@ -412,7 +412,7 @@ export class IngestionService {
   }
 
   private async getMatchSlug(client: { query: typeof db.query }, matchId: string) {
-    const match = await client.query("SELECT slug FROM matches WHERE id = $1", [matchId]);
+    const match = await client.query("SELECT slug FROM v_valid_matches WHERE id = $1", [matchId]);
     return match.rows[0]?.slug as string | null;
   }
 
@@ -426,7 +426,7 @@ export class IngestionService {
     const existing = await client.query(
       `
         SELECT m.id
-        FROM matches m
+        FROM v_valid_matches m
         JOIN match_competitors home_comp
           ON home_comp.match_id = m.id
          AND home_comp.home_away = 'home'

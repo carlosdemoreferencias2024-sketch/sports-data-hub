@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import { recordManualOddsSnapshot } from "../dist/trading/odds-snapshot-cache.js";
 
+const now = Date.now();
+const kickoff = new Date(now + 2 * 60 * 60 * 1000).toISOString();
+
 function mockDb() {
   const calls = [];
   return {
     calls,
     async query(sql) {
       calls.push(sql);
-      if (sql.includes("FROM matches m")) {
-        return { rows: [{ match_id: "match-1", kickoff: "2026-08-10T23:00:00.000Z", status: "scheduled", league_slug: "mlb", sport_slug: "baseball" }] };
+      if (sql.includes("FROM v_valid_matches m")) {
+        return { rows: [{ match_id: "match-1", kickoff, status: "scheduled", league_slug: "mlb", sport_slug: "baseball" }] };
       }
       if (sql.includes("INSERT INTO market_quotes")) return { rows: [{ id: "market-quote-1" }] };
       if (sql.includes("INSERT INTO odds_snapshots")) return { rows: [{ snapshot_id: "snapshot-1" }] };
@@ -25,8 +28,8 @@ const base = {
   bookmaker: "Example Book",
   source_name: "sportsbook_manual_verified",
   source_url: "manual_verified_screen",
-  captured_at: "2026-08-10T21:00:00.000Z",
-  expires_at: "2026-08-10T22:00:00.000Z",
+  captured_at: new Date(now - 60 * 1000).toISOString(),
+  expires_at: new Date(now + 10 * 60 * 1000).toISOString(),
   verified_by: "Carlos",
   snapshot_type: "entry"
 };

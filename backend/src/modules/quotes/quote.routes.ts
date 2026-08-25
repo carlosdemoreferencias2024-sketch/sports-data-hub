@@ -262,7 +262,7 @@ export async function quoteRoutes(app: FastifyInstance) {
                 $3, $4, NULLIF($5, ''), NULLIF($6, ''), NULLIF($7, ''),
                 $8, $9, $10, $11, $12, $13,
                 $14, $15, $16
-              FROM matches m
+              FROM v_valid_matches m
               JOIN leagues l ON l.id = m.league_id
               JOIN sports s ON s.id = l.sport_id
               WHERE m.id = $2

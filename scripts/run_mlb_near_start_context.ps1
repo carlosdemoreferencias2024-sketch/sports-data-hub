@@ -1,8 +1,10 @@
 param(
   [string]$ModelName = "carlos_v1_mlb",
   [string]$OutputDir = "workers",
+  [string]$RepoRoot = "",
   [switch]$Apply,
   [switch]$Strict,
+  [switch]$Force,
   [switch]$NoHydrateSnapshots,
   [double]$SleepSeconds = 0.05
 )
@@ -10,7 +12,21 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")
+$repoRoot = if ($RepoRoot) { Resolve-Path -LiteralPath $RepoRoot } else { Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..") }
+
+function Invoke-DockerCommand([string[]]$Arguments) {
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $output = & docker @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+  foreach ($line in @($output)) { Write-Host $line }
+  return $exitCode
+}
+
 Push-Location $repoRoot
 try {
   $resolvedOutputDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDir)
@@ -25,9 +41,32 @@ try {
   $filledName = Split-Path -Leaf $filledPath
 
   Write-Host "[mlb-near-start] Step 1/3 generate active MLB template -> $templatePath"
-  & (Join-Path $PSScriptRoot "run_mlb_matchup_features.ps1") -Mode GenerateTemplate -OutputPath $templatePath
+  & (Join-Path $PSScriptRoot "run_mlb_matchup_features.ps1") -Mode GenerateTemplate -OutputPath $templatePath -RepoRoot $repoRoot
   if ($LASTEXITCODE -ne 0) {
     throw "template generation failed with exit code $LASTEXITCODE"
+  }
+
+  $nowUtc = [DateTimeOffset]::UtcNow
+  $templateRows = @(Import-Csv -LiteralPath $templatePath)
+  $windowRows = @($templateRows | Where-Object {
+    if ([string]::IsNullOrWhiteSpace([string]$_.kickoff)) { return $false }
+    try {
+      $minutesToStart = ([DateTimeOffset]::Parse([string]$_.kickoff).ToUniversalTime() - $nowUtc).TotalMinutes
+      return (($minutesToStart -ge 60 -and $minutesToStart -le 90) -or ($minutesToStart -ge 20 -and $minutesToStart -le 45))
+    } catch {
+      return $false
+    }
+  })
+  if (-not $Force -and $windowRows.Count -eq 0) {
+    Write-Host "[mlb-near-start] SKIP: no games inside 90-60 or 45-20 minute windows."
+    Write-Host "[mlb-near-start] guardrails: REAL_CANDIDATE=0 real_money=false kelly=false telegram_auto=false"
+    return
+  }
+  if (-not $Force) {
+    $windowRows | Export-Csv -LiteralPath $templatePath -NoTypeInformation -Encoding UTF8
+    Write-Host "[mlb-near-start] window_games=$($windowRows.Count) total_active=$($templateRows.Count)"
+  } else {
+    Write-Host "[mlb-near-start] force=true total_active=$($templateRows.Count)"
   }
 
   Write-Host "[mlb-near-start] Step 2/3 fill verified MLB context -> $filledPath"
@@ -43,9 +82,9 @@ try {
   if (-not $Strict) {
     $fillArgs += "--allow-partial"
   }
-  & docker @fillArgs
-  if ($LASTEXITCODE -ne 0) {
-    throw "MLB Stats API fill failed with exit code $LASTEXITCODE"
+  $dockerExitCode = Invoke-DockerCommand $fillArgs
+  if ($dockerExitCode -ne 0) {
+    throw "MLB Stats API fill failed with exit code $dockerExitCode"
   }
 
   Write-Host "[mlb-near-start] Step 3/3 hydrate feature_set apply=$Apply strict=$Strict"
@@ -53,6 +92,7 @@ try {
     Mode = "Hydrate"
     InputPath = $filledPath
     ModelName = $ModelName
+    RepoRoot = $repoRoot
   }
   if ($Apply) {
     $hydrateParams.Apply = $true

@@ -2,7 +2,8 @@ param(
   [string]$HubBaseUrl = "http://127.0.0.1:4000",
   [string]$InternalApiKey = $(if ($env:INTERNAL_API_KEY) { $env:INTERNAL_API_KEY } else { $env:SPORTS_DATA_HUB_INTERNAL_KEY }),
   [string]$Date = "",
-  [string]$ModelName = "sports_data_hub_football_fair_odds_v1",
+  [string]$MatchId = "",
+  [string]$ModelName = "sports_data_hub_football_fair_odds_v3",
   [double]$MinEv = 0.03,
   [double]$MinShadowConfidence = 0.50,
   [int]$MaxModelAgeMinutes = 1440,
@@ -32,6 +33,10 @@ $queryParts = @(
 if ($Date) {
   $queryParts += "date=$([uri]::EscapeDataString($Date))"
 }
+if ($MatchId) {
+  try { [void][Guid]::Parse($MatchId) } catch { throw "MatchId debe ser UUID: $MatchId" }
+  $queryParts += "match_id=$([uri]::EscapeDataString($MatchId))"
+}
 
 $headers = @{
   "X-Internal-API-Key" = $InternalApiKey
@@ -39,7 +44,7 @@ $headers = @{
 }
 
 $url = "$HubBaseUrl/api/v1/internal/model-quotes/owned-fair-odds-bridge/register-shadow-review?$($queryParts -join '&')"
-Write-Host "[football-shadow-review-register] date=$(if ($Date) { $Date } else { 'auto' }) dry_run=$(-not $Apply) apply=$Apply"
+Write-Host "[football-shadow-review-register] match_id=$(if ($MatchId) { $MatchId } else { 'all' }) date=$(if ($Date) { $Date } else { 'auto' }) dry_run=$(-not $Apply) apply=$Apply"
 
 $response = Invoke-RestMethod `
   -Method Post `

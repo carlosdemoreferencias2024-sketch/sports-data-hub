@@ -418,7 +418,7 @@ async function findTargets(db: Queryable, input: HydrateInput): Promise<GatewayT
         COALESCE(m.raw_data->>'api_football_fixture_id', lc.raw_data->>'api_football_fixture_id') AS api_football_fixture_id,
         COALESCE(m.raw_data->>'api_football_league_id', lc.raw_data->>'api_football_league_id') AS api_football_league_id,
         COALESCE(m.raw_data->>'api_football_season', lc.raw_data->>'api_football_season') AS api_football_season
-      FROM matches m
+      FROM v_valid_matches m
       JOIN leagues l ON l.id = m.league_id
       LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
       LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
@@ -750,7 +750,7 @@ export async function hydrateFootballManualContext(db: Queryable, body: unknown)
           l.slug AS league_id,
           home_team.name AS home_team,
           away_team.name AS away_team
-        FROM matches m
+        FROM v_valid_matches m
         JOIN leagues l ON l.id = m.league_id
         LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
         LEFT JOIN teams home_team ON home_team.id = home_mc.team_id

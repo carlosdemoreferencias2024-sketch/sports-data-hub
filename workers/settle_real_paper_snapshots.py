@@ -143,7 +143,7 @@ def settle_pending(limit: int, dry_run: bool, require_closing: bool = True) -> d
               FROM real_paper_snapshots rps
               JOIN market_quotes mk ON mk.id = rps.market_quote_id
             ) rps
-            JOIN matches m ON m.id = rps.match_id
+            JOIN v_valid_matches m ON m.id = rps.match_id
             JOIN match_competitors trade_home
               ON trade_home.match_id = m.id
              AND trade_home.home_away = 'home'
@@ -152,7 +152,7 @@ def settle_pending(limit: int, dry_run: bool, require_closing: bool = True) -> d
              AND trade_away.home_away = 'away'
             LEFT JOIN LATERAL (
               SELECT fm.id, fm.home_score, fm.away_score, fm.match_date, fm.raw_data, fm.status
-              FROM matches fm
+              FROM v_valid_matches fm
               JOIN match_competitors final_home
                 ON final_home.match_id = fm.id
                AND final_home.home_away = 'home'

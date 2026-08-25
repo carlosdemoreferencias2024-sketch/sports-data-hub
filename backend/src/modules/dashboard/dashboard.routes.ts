@@ -787,6 +787,7 @@ const dashboardHtml = String.raw`<!doctype html>
         <div class="command-card"><span>Closing ahora</span><strong id="csqClosingNow">0</strong><p>Accion inmediata.</p></div>
         <div class="command-card"><span>Near-start</span><strong id="csqNearStart">0</strong><p>Lineup/pitcher/portero.</p></div>
         <div class="command-card"><span>Entry missing</span><strong id="csqEntryMissing">0</strong><p>Faltan cuotas verificadas.</p></div>
+        <div class="command-card"><span>Fair odds listas</span><strong id="csqFairReady">0/0</strong><p>Modelo propio cargado.</p></div>
         <div class="command-card"><span>Fair odds missing</span><strong id="csqFairMissing">0</strong><p>Falta modelo/fair odds.</p></div>
         <div class="command-card"><span>Fixture time</span><strong id="csqFixtureTime">0</strong><p>Hora no verificada.</p></div>
         <div class="command-card"><span>Post-kickoff</span><strong id="csqPostKickoff">0</strong><p>Solo auditoria.</p></div>
@@ -847,7 +848,17 @@ const dashboardHtml = String.raw`<!doctype html>
       </div>
       <div class="table-wrap"><table id="manualVerifiedSourceCapturesTable"></table></div>
     </section>
-    <section id="matchPreflightQueue"><h2>Match Preflight Queue <small class="muted">(que falta antes de cerrar o liquidar)</small></h2>
+    <section id="candidatePreflightQueue"><h2>Candidate Preflight</h2>
+      <p id="candidatePreflightRecommendation" class="section-note">Cargando candidatos.</p>
+      <div class="command-grid">
+        <div class="command-card"><span>Evaluados</span><strong id="cpfScanned">0</strong></div>
+        <div class="command-card"><span>PASS</span><strong id="cpfPassed">0</strong></div>
+        <div class="command-card"><span>FAIL</span><strong id="cpfFailed">0</strong></div>
+        <div class="command-card"><span>REAL_CANDIDATE</span><strong id="cpfRealCandidate">0</strong></div>
+      </div>
+      <div class="table-wrap"><table id="candidatePreflightTable"></table></div>
+    </section>
+    <section id="matchPreflightQueue"><h2>Chain Preflight Queue <small class="muted">(closing, resultado, settlement y CLV)</small></h2>
       <p id="matchPreflightQueueRecommendation" class="section-note">Cargando preflight. No crea picks; ordena partidos por accion pendiente.</p>
       <div class="command-grid">
         <div class="command-card"><span>Scanned</span><strong id="mpfScanned">0</strong><p>Partidos/tickets revisados.</p></div>
@@ -2471,7 +2482,9 @@ const dashboardHtml = String.raw`<!doctype html>
       const summary = cleanQueue.summary || {};
       const targets = cleanQueue.sample_targets || {};
       const realSummary = realPaper.summary || {};
-      const hasEvidence = row => Boolean(row && row.evidence_id && row.screenshot_sha256);
+      const hasEvidence = row => Boolean(
+        row && row.evidence_id && (row.screenshot_sha256 || row.raw_payload_hash)
+      );
       const validEntries = snapshots.filter(row =>
         ["entry", "current"].includes(String(row.snapshot_type || "").toLowerCase())
         && row.safe_for_entry === true
@@ -2518,7 +2531,11 @@ const dashboardHtml = String.raw`<!doctype html>
       const summary = data.summary || {};
       const targets = data.sample_targets || {};
       const rows = data.focus_rows || data.rows || [];
-      $("cleanSampleQueueRecommendation").textContent = data.recommendation || "Rutina limpia lista. No crea picks ni ejecuta acciones.";
+      const allRows = data.rows || rows;
+      const scanned = Number(summary.scanned || allRows.length || 0);
+      const fairReady = allRows.filter(row => Boolean(row.model_quote_id)).length;
+      const fairProgress = "Avance: fair odds " + fairReady + "/" + scanned + " cargadas; entry verificable pendiente en " + String(summary.entry_missing || 0) + ".";
+      $("cleanSampleQueueRecommendation").textContent = fairProgress + " " + (data.recommendation || "Rutina limpia lista. No crea picks ni ejecuta acciones.");
       $("csqFocus").textContent = String(summary.focus_count || (data.focus_rows || []).length || 0);
       $("csqFootballSample").textContent = String(targets.football_clean_closed || 0) + "/" + String(targets.football_target_min || 50);
       $("csqMlbSample").textContent = String(targets.mlb_clean_closed || 0) + "/" + String(targets.mlb_target_min || 150);
@@ -2526,6 +2543,7 @@ const dashboardHtml = String.raw`<!doctype html>
       $("csqClosingNow").textContent = String(summary.capture_closing_now || 0);
       $("csqNearStart").textContent = String(summary.near_start_now || 0);
       $("csqEntryMissing").textContent = String(summary.entry_missing || 0);
+      $("csqFairReady").textContent = String(fairReady) + "/" + String(scanned);
       $("csqFairMissing").textContent = String(summary.fair_odds_missing || 0);
       $("csqFixtureTime").textContent = String(summary.fixture_time_unverified || 0);
       $("csqPostKickoff").textContent = String(summary.post_kickoff_audit_only || 0);
@@ -2960,6 +2978,27 @@ const dashboardHtml = String.raw`<!doctype html>
         missing: ["universe"],
         next_action: data.recommendation || "Cargar universo del dia."
       }]);
+    }
+    function renderCandidatePreflight(data) {
+      data = data || {};
+      const rows = data.rows || [];
+      $("candidatePreflightRecommendation").textContent = rows.length
+        ? "Snapshots inmutables al instante de decision."
+        : "Sin candidatos evaluados para esta fecha.";
+      $("cpfScanned").textContent = String(data.scanned || rows.length || 0);
+      $("cpfPassed").textContent = String(data.passed || 0);
+      $("cpfFailed").textContent = String(data.failed || 0);
+      $("cpfRealCandidate").textContent = String(data.guardrails?.real_candidate_count || 0);
+      renderTable("candidatePreflightTable", [
+        { label: "Match", value: r => esc((r.home_team || "Home") + " vs " + (r.away_team || "Away")) },
+        { label: "Sport", value: r => esc((r.sport || "-") + "/" + (r.league || "-")) },
+        { label: "Kickoff", value: r => liveTime(r.kickoff) },
+        { label: "Decision as-of", value: r => liveTime(r.decision_as_of) },
+        { label: "Verdict", value: r => r.verdict === "PASS" && r.hash_valid ? "<span class='value'>PASS</span>" : "<span class='warn'>FAIL</span>" },
+        { label: "EV", value: r => r.expected_value === null || r.expected_value === undefined ? "-" : fmtPct(r.expected_value) },
+        { label: "Hash", value: r => r.hash_valid ? "<span class='value'>VALID</span>" : "<span class='loss'>INVALID</span>" },
+        { label: "Reasons", value: r => (r.reasons_json || []).map(esc).join(", ") || "-" }
+      ], rows);
     }
     function renderFootballOwnedFairOdds(data) {
       data = data || {};
@@ -3632,6 +3671,7 @@ const dashboardHtml = String.raw`<!doctype html>
           sportsLiveBoard,
           matchCenter,
           bestBetsPerMatch,
+          candidatePreflightQueue,
           matchPreflightQueue,
           bottleneckBySource,
           closingWindowWatch,
@@ -3731,6 +3771,7 @@ const dashboardHtml = String.raw`<!doctype html>
           getJson("/api/v1/internal/analytics/live-board?date=" + matchDate),
           getJson("/api/v1/internal/analytics/match-center?date=" + matchDate + "&fallback_recent=true"),
           getJson("/api/v1/internal/analytics/best-bets-per-match?date=" + matchDate + "&fallback_recent=true"),
+          getJson("/api/v1/internal/analytics/candidate-preflight/status?date=" + matchDate + "&sport=all&limit=120"),
           getJson("/api/v1/internal/analytics/match-preflight/status?date=" + matchDate + "&sport=all&limit=120"),
           getJson("/api/v1/internal/analytics/bottleneck-by-source?date=" + matchDate + "&sport=all&limit=120"),
           getJson("/api/v1/internal/analytics/closing-window-watch?date=" + matchDate + "&sport=all&limit=120"),
@@ -3742,7 +3783,7 @@ const dashboardHtml = String.raw`<!doctype html>
           getJson("/api/v1/internal/analytics/clean-sample-queue?date=" + matchDate + "&sport=all&limit=120"),
           getJson("/api/v1/internal/analytics/shadow-ticket-chain?date=" + matchDate + "&sport=all&limit=120"),
           getJson("/api/v1/internal/analytics/source-capture/manual-verified/status?date=" + matchDate + "&sport=all&limit=120"),
-          getJson("/api/v1/internal/model-quotes/owned-fair-odds-bridge?sport=soccer&model_name=sports_data_hub_football_fair_odds_v1&date=" + matchDate + "&max_model_age_minutes=1440&max_market_age_minutes=1440&limit=80"),
+          getJson("/api/v1/internal/model-quotes/owned-fair-odds-bridge?sport=soccer&date=" + matchDate + "&max_model_age_minutes=1440&max_market_age_minutes=1440&limit=80"),
           getJson("/api/v1/internal/analytics/football/performance/segments?date_to=" + matchDate + "&min_closed=30&limit=120"),
           getJson("/api/v1/internal/analytics/near-start-context/status?date=" + matchDate + "&fallback_recent=true"),
           getJson("/api/v1/internal/model-quotes/performance-summary"),
@@ -4084,6 +4125,7 @@ const dashboardHtml = String.raw`<!doctype html>
         renderOperationalAlerts(operationalAlerts);
         renderSourceCaptureQueue(bottleneckBySource);
         renderManualVerifiedSourceCaptures(manualVerifiedSourceCaptures);
+        renderCandidatePreflight(candidatePreflightQueue);
         renderMatchPreflightQueue(matchPreflightQueue);
         renderFootballOwnedFairOdds(footballOwnedFairOddsBridge);
         renderFootballShadowSegments(footballShadowSegments);
@@ -5092,11 +5134,6 @@ export async function dashboardRoutes(app: FastifyInstance) {
     return reply.header("content-type", "text/html; charset=utf-8").send(dashboardHtml);
   });
 }
-
-
-
-
-
 
 
 

@@ -1,0 +1,10 @@
+hub_match_id,model_name,home_team,away_team,kickoff,bookmaker,pick,entry_odds,model_probability,expected_value,probable_pitcher_home,probable_pitcher_away,home_era,home_whip,home_ops,home_bullpen_era,home_lineup_confirmed,home_rest_days,home_travel_distance,away_era,away_whip,away_ops,away_bullpen_era,away_lineup_confirmed,away_rest_days,away_travel_distance,source,source_url,verified_at
+fad051d7-6741-4bac-bb51-d2b9244e4556,carlos_v1_mlb,Chicago White Sox,Cincinnati Reds,2026-08-13 17:10:00+00:00,,,,,,,,,,,,,,,,,,,,,,,,
+e5293ddf-fc4d-449f-be97-e1870a83e098,carlos_v1_mlb,Detroit Tigers,Cleveland Guardians,2026-08-13 17:10:00+00:00,,,,,,,,,,,,,,,,,,,,,,,,
+c8779f3b-b9d2-4139-b04f-fe2476035d34,carlos_v1_mlb,Miami Marlins,Pittsburgh Pirates,2026-08-13 17:10:00+00:00,,,,,,,,,,,,,,,,,,,,,,,,
+baf7a637-afc9-4f6c-9439-af05ca16b809,carlos_v1_mlb,New York Yankees,Seattle Mariners,2026-08-13 17:35:00+00:00,,,,,,,,,,,,,,,,,,,,,,,,
+27fae14b-a48e-4e26-8a36-b472d99df979,carlos_v1_mlb,Toronto Blue Jays,Boston Red Sox,2026-08-13 19:07:00+00:00,,,,,,,,,,,,,,,,,,,,,,,,
+a3676b4a-0177-4776-bfdc-c6dfe665b425,carlos_v1_mlb,Washington Nationals,Chicago Cubs,2026-08-13 20:05:00+00:00,,,,,,,,,,,,,,,,,,,,,,,,
+3a21b21c-6489-4132-a396-084c9d7a9b56,carlos_v1_mlb,Minnesota Twins,Philadelphia Phillies,2026-08-13 23:30:00+00:00,,,,,,,,,,,,,,,,,,,,,,,,
+8bfded3f-1a23-40b0-b0a3-1dd6a12d5184,carlos_v1_mlb,Los Angeles Angels,Texas Rangers,2026-08-14 02:07:00+00:00,,,,,,,,,,,,,,,,,,,,,,,,
+002f899a-5266-4c38-8470-a132bfbcf0e1,carlos_v1_mlb,Los Angeles Dodgers,Milwaukee Brewers,2026-08-14 02:10:00+00:00,,,,,,,,,,,,,,,,,,,,,,,,

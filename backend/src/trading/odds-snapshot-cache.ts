@@ -30,6 +30,7 @@ type ManualSnapshotInput = {
   window_status?: unknown;
   evidence_id?: unknown;
   screenshot_sha256?: unknown;
+  raw_payload_hash?: unknown;
   line?: unknown;
   raw_data?: unknown;
 };
@@ -103,10 +104,11 @@ async function matchContext(db: Queryable, matchId: string) {
         CASE
           WHEN l.slug IN ('mlb', 'baseball/mlb') THEN 'baseball'
           WHEN l.slug = 'nba' THEN 'basketball'
+          WHEN l.slug = 'nfl' OR s.slug = 'american-football' THEN 'american_football'
           WHEN l.slug LIKE '%world-cup%' OR s.slug = 'soccer' THEN 'soccer'
           ELSE s.slug
         END AS sport_slug
-      FROM matches m
+      FROM v_valid_matches m
       JOIN leagues l ON l.id = m.league_id
       JOIN sports s ON s.id = l.sport_id
       WHERE m.id = $1
@@ -223,6 +225,7 @@ export async function getOddsSnapshotCache(db: Queryable, input: CacheQuery = {}
         END AS audit_only,
         os.raw_data->>'evidence_id' AS evidence_id,
         os.raw_data->>'screenshot_sha256' AS screenshot_sha256,
+        os.raw_data->>'raw_payload_hash' AS raw_payload_hash,
         os.raw_data->>'closing_quality' AS closing_quality,
         os.quality_score,
         os.quality_flags,
@@ -230,7 +233,7 @@ export async function getOddsSnapshotCache(db: Queryable, input: CacheQuery = {}
         m.status AS match_status,
         CONCAT(home_team.name, ' @ ', away_team.name) AS match
       FROM odds_snapshots os
-      JOIN matches m ON m.id = os.match_id
+      JOIN v_valid_matches m ON m.id = os.match_id
       LEFT JOIN match_competitors mh ON mh.match_id = m.id AND mh.home_away = 'away'
       LEFT JOIN teams home_team ON home_team.id = mh.team_id
       LEFT JOIN match_competitors ma ON ma.match_id = m.id AND ma.home_away = 'home'

@@ -1,4 +1,5 @@
 import { getClosingWindowWatch } from "./closing-window-watch.js";
+import { getCleanSampleQueue } from "./clean-sample-queue.js";
 import { getMatchPreflightStatus } from "./match-preflight-engine.js";
 import { getMlbNearStartSchedule } from "./mlb-near-start-schedule.js";
 import { closingWindowStatusNow, tradingLocalDate, TRADING_TIME_ZONE } from "./timezone.js";
@@ -35,6 +36,15 @@ type QueueRow = {
   priority: number;
 };
 
+function candidateMissing(row: Record<string, any>) {
+  const missing: string[] = [];
+  if (!row.model_quote_id) missing.push("fair_odds");
+  if (!row.entry_snapshot_safe_for_entry) missing.push("entry_current_odds");
+  if (!row.entry_evidence_id) missing.push("entry_evidence");
+  if (!row.ticket_id) missing.push("candidate_preflight", "shadow_ticket");
+  return [...new Set(missing)];
+}
+
 function localDate(date?: string) {
   return date || tradingLocalDate();
 }
@@ -43,6 +53,8 @@ function normalizeSport(input?: string) {
   const sport = String(input || "all").toLowerCase();
   if (["football", "soccer", "futbol", "fÃºtbol"].includes(sport)) return "soccer";
   if (["baseball", "mlb"].includes(sport)) return "baseball";
+  if (["nfl", "american-football", "american_football", "american football"].includes(sport)) return "american_football";
+  if (["nba", "basketball", "baloncesto"].includes(sport)) return "basketball";
   return "all";
 }
 
@@ -95,10 +107,13 @@ function riskFor(status: string, row: Record<string, any>, closingStatus?: strin
 function commandFor(status: string, sport: string) {
   if (status === "RUN_NEAR_START_NOW" && sport === "baseball") return "scripts\\run_mlb_near_start_context.cmd -Apply";
   if (status === "RUN_NEAR_START_NOW" && sport === "soccer") return "POST /api/trading/football/lineups/manual-verified";
+  if (status === "RUN_NEAR_START_NOW" && sport === "american_football") return "scripts\\run_nfl_near_start_cycle.ps1";
   if (status === "CAPTURE_CLOSING_NOW" && sport === "baseball") return "scripts\\run_auto_mlb_real_paper.cmd -ForceClosing";
   if (status === "CAPTURE_CLOSING_NOW" && sport === "soccer") return "scripts\\run_football_shadow_settlement.cmd -InputPath <verified_closing.json> -Apply";
   if (status === "READY_FOR_SETTLEMENT" && sport === "soccer") return "POST /api/trading/football/settlement/run?date=YYYY-MM-DD";
   if (status === "READY_FOR_SETTLEMENT" && sport === "baseball") return "Verificar resultado oficial; correr settlement MLB aprobado.";
+  if (status === "READY_FOR_SETTLEMENT" && sport === "american_football") return "Verificar resultado NFL oficial; correr settlement shadow aprobado.";
+  if (status === "READY_FOR_SETTLEMENT" && sport === "basketball") return "Verificar resultado NBA oficial; correr settlement shadow aprobado.";
   return "No ejecutar comando automatico; mantener lectura/auditoria.";
 }
 
@@ -111,7 +126,9 @@ function nextStepFor(status: string, sport: string, row: Record<string, any>, bo
   if (status === "RUN_NEAR_START_NOW") {
     return sport === "baseball"
       ? "Actualizar pitchers, lineups, batting order, bullpen, park/weather; no confirmar sin closing."
-      : "Cargar lineup/portero/bajas con fuente oficial o manual_verified confiable.";
+      : sport === "american_football"
+        ? "Actualizar inactivos, QB titular, lesiones, clima y sede; bloquear si falta confirmacion oficial."
+        : "Cargar lineup/portero/bajas con fuente oficial o manual_verified confiable.";
   }
   if (status === "READY_FOR_SETTLEMENT") return "Verificar resultado final antes de liquidar; no settlement con marcador dudoso.";
   if (status === "WAITING_RESULT") return "Esperar marcador final verificado; closing ya debe estar on-time.";
@@ -150,6 +167,11 @@ function deriveStatus(
     if (needsLineup && minutes !== null && minutes <= 60 && minutes >= 15) return "RUN_NEAR_START_NOW";
   }
 
+  if (sport === "american_football") {
+    const needsContext = missing.some((field) => ["official_inactives", "starting_quarterbacks", "injury_context", "weather_context"].includes(String(field)));
+    if (needsContext && minutes !== null && minutes <= 90 && minutes >= 20) return "RUN_NEAR_START_NOW";
+  }
+
   return "WAITING_WINDOW";
 }
 
@@ -167,16 +189,54 @@ function priorityFor(status: string, minutes: number | null, risk: string) {
   return (statusWeight[status] || 10) * 1000 + Math.max(0, minutes ?? 240) + riskPenalty;
 }
 
+export function buildCandidateQueueRow(row: Record<string, any>): QueueRow {
+  const sourceAction = String(row.action || "PREPARE_CANDIDATE");
+  const status = ["RUN_NEAR_START_NOW", "CAPTURE_LINEUP_GOALKEEPER_NOW"].includes(sourceAction)
+    ? "RUN_NEAR_START_NOW"
+    : sourceAction === "CAPTURE_CLOSING_NOW"
+      ? "CAPTURE_CLOSING_NOW"
+      : "PREPARE_CANDIDATE";
+  const minutes = Number.isFinite(Number(row.minutes_until_start)) ? Number(row.minutes_until_start) : null;
+  return {
+    match_id: row.match_id || null,
+    ticket_id: row.ticket_id || null,
+    match: row.match || "Unknown match",
+    sport: row.sport || "unknown",
+    league: row.league || null,
+    kickoff: row.kickoff || null,
+    minutes_until_start: minutes,
+    window: status === "CAPTURE_CLOSING_NOW"
+      ? "10-to-3 closing"
+      : status === "RUN_NEAR_START_NOW"
+        ? "near-start"
+        : "candidate preparation",
+    action: status,
+    command: status === "RUN_NEAR_START_NOW"
+      ? commandFor(status, row.sport || "unknown")
+      : "No crear ticket; completar fair odds, entry/current, evidencia y Candidate Preflight.",
+    missing: candidateMissing(row),
+    status,
+    risk: "HIGH",
+    next_step: row.next_step || "Completar la cadena candidata antes de cualquier ticket shadow.",
+    can_be_manual_verified: true,
+    blocked_by_external_source: !row.entry_evidence_id,
+    closing_status: row.closing_quality || null,
+    preflight_status: "NOT_RUN",
+    priority: priorityFor(status, minutes, "HIGH")
+  };
+}
+
 export async function getOperationalWindowQueue(db: Queryable, input: OperationalWindowInput = {}) {
   const date = localDate(input.date);
   const sport = normalizeSport(input.sport);
   const limit = Math.max(1, Math.min(300, Number(input.limit || 120)));
-  const [preflight, closingWatch, mlbSchedule] = await Promise.all([
+  const [preflight, closingWatch, mlbSchedule, cleanQueue] = await Promise.all([
     getMatchPreflightStatus(db, { date, sport, limit }),
     getClosingWindowWatch(db, { date, sport, limit }),
     sport === "soccer"
       ? Promise.resolve({ rows: [] as Record<string, any>[] })
-      : getMlbNearStartSchedule(db, { date, limit })
+      : getMlbNearStartSchedule(db, { date, limit }),
+    getCleanSampleQueue(db, { date, sport, limit })
   ]);
 
   const closingByKey = new Map<string, Record<string, any>>();
@@ -189,7 +249,7 @@ export async function getOperationalWindowQueue(db: Queryable, input: Operationa
     if (row.match_id) mlbByMatch.set(String(row.match_id), row);
   }
 
-  const rows: QueueRow[] = (preflight.rows || []).map((row: Record<string, any>) => {
+  const chainRows: QueueRow[] = (preflight.rows || []).map((row: Record<string, any>) => {
     const key = row.paper_trade_id || row.real_paper_snapshot_id || row.match_id;
     const closingRow = key ? closingByKey.get(String(key)) || closingByKey.get(String(row.match_id || "")) : undefined;
     const mlbRow = row.match_id ? mlbByMatch.get(String(row.match_id)) : undefined;
@@ -224,12 +284,18 @@ export async function getOperationalWindowQueue(db: Queryable, input: Operationa
       preflight_status: row.preflight_status || null,
       priority: priorityFor(status, minutes, risk)
     };
-  }).sort((a, b) => a.priority - b.priority);
+  });
+  const chainMatchIds = new Set(chainRows.map((row) => row.match_id).filter(Boolean));
+  const candidateRows = (cleanQueue.focus_rows || [])
+    .filter((row: Record<string, any>) => row.match_id && !chainMatchIds.has(String(row.match_id)))
+    .map(buildCandidateQueueRow);
+  const rows = [...chainRows, ...candidateRows].sort((a, b) => a.priority - b.priority);
 
   const count = (status: string) => rows.filter((row) => row.status === status).length;
   const manualCount = rows.filter((row) => row.can_be_manual_verified).length;
   const blockedCount = rows.filter((row) => row.blocked_by_external_source).length;
   const nextNow = rows.find((row) => ["CAPTURE_CLOSING_NOW", "RUN_NEAR_START_NOW", "READY_FOR_SETTLEMENT"].includes(row.status));
+  const nextPreparation = rows.find((row) => row.status === "PREPARE_CANDIDATE");
 
   return {
     system_status: "OPERATIONAL_WINDOW_ORCHESTRATOR_SAFE_V1",
@@ -246,13 +312,16 @@ export async function getOperationalWindowQueue(db: Queryable, input: Operationa
       ready_for_settlement: count("READY_FOR_SETTLEMENT"),
       waiting_result: count("WAITING_RESULT"),
       post_kickoff_audit_only: count("POST_KICKOFF_AUDIT_ONLY"),
+      prepare_candidate: count("PREPARE_CANDIDATE"),
       manual_verified_available: manualCount,
       external_source_blocked: blockedCount
     },
     rows,
     recommendation: nextNow
       ? `Accion inmediata: ${nextNow.status} para ${nextNow.match}. ${nextNow.next_step}`
-      : "No hay accion inmediata; esperar ventanas o cargar fuentes verificadas pendientes.",
+      : nextPreparation
+        ? `Preparar un solo foco: ${nextPreparation.match}. ${nextPreparation.next_step}`
+        : "No hay accion inmediata; esperar ventanas o cargar fuentes verificadas pendientes.",
     guardrails: {
       real_candidate_count: 0,
       real_money_enabled: false,

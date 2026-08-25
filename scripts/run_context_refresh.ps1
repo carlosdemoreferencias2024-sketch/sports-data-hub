@@ -1,10 +1,11 @@
 param(
   [string]$Date = (Get-Date -Format "yyyy-MM-dd"),
+  [string]$RepoRoot = "",
   [string]$HubBaseUrl = "http://127.0.0.1:4000",
   [string]$InternalApiKey = $(if ($env:INTERNAL_API_KEY) { $env:INTERNAL_API_KEY } else { $env:SPORTS_DATA_HUB_INTERNAL_KEY }),
   [string]$ApiFootballKey = $(if ($env:API_FOOTBALL_KEY) { $env:API_FOOTBALL_KEY } else { $env:FOOTBALL_API_KEY }),
   [string]$SportsDataIoApiKey = $(if ($env:SPORTSDATAIO_API_KEY) { $env:SPORTSDATAIO_API_KEY } else { $env:SPORTS_DATA_IO_API_KEY }),
-  [string]$LeagueIds = "mls,liga-mx,brasileirao-serie-a,fifa-world-cup-2026",
+  [string]$LeagueIds = "mls,liga-mx,nwsl,brasileirao-serie-a,argentina-primera-division,uefa-champions-league,europa-league,conference-league,leagues-cup,copa-libertadores,copa-sudamericana,premier-league,la-liga,serie-a,bundesliga",
   [int]$MaxApiRequests = 20,
   [switch]$ApplyCalendar,
   [switch]$ApplyFootballContext,
@@ -18,7 +19,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = if ($RepoRoot) { (Resolve-Path -LiteralPath $RepoRoot).Path } else { Split-Path -Parent $PSScriptRoot }
+$ScriptRoot = Join-Path $RepoRoot "scripts"
 Set-Location $RepoRoot
 
 function Write-Step([string]$Message) {
@@ -51,14 +53,14 @@ function Resolve-Key([string]$Current, [string[]]$Names) {
 
 function Invoke-HubGet([string]$Path) {
   $headers = @{ "X-API-Key" = $InternalApiKey; "X-Internal-API-Key" = $InternalApiKey }
-  Invoke-RestMethod -Method Get -Uri "$HubBaseUrl$Path" -Headers $headers
+  Invoke-RestMethod -Method Get -Uri "$HubBaseUrl$Path" -Headers $headers -TimeoutSec 60
 }
 
 function Invoke-HubPost([string]$Path, [object]$Payload) {
   $headers = @{ "X-API-Key" = $InternalApiKey; "X-Internal-API-Key" = $InternalApiKey }
   $json = $Payload | ConvertTo-Json -Depth 24
   $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
-  Invoke-RestMethod -Method Post -Uri "$HubBaseUrl$Path" -Headers $headers -ContentType "application/json; charset=utf-8" -Body $bytes
+  Invoke-RestMethod -Method Post -Uri "$HubBaseUrl$Path" -Headers $headers -ContentType "application/json; charset=utf-8" -Body $bytes -TimeoutSec 180
 }
 
 function Has-Prop($Object, [string]$Name) {
@@ -101,11 +103,11 @@ function Invoke-FootballCalendarRefresh([string]$RunDate) {
   }
 
   $dateStamp = ([datetime]::Parse($RunDate)).ToString("yyyyMMdd")
-  $outputPath = Join-Path $PSScriptRoot ("football_today_api_football_{0}.json" -f $dateStamp)
+  $outputPath = Join-Path $ScriptRoot ("football_today_api_football_{0}.json" -f $dateStamp)
   $leagueList = @($LeagueIds -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
   Write-Step "Football calendar dry-run $RunDate"
-  & (Join-Path $PSScriptRoot "build_api_football_universe.ps1") -ApiKey $ApiFootballKey -Date $RunDate -LeagueIds $leagueList -UseGlobalDateEndpoint -OutputPath $outputPath -AllowApiOnlyTrustedKickoff
+  & (Join-Path $ScriptRoot "build_api_football_universe.ps1") -ApiKey $ApiFootballKey -Date $RunDate -LeagueIds $leagueList -UseGlobalDateEndpoint -OutputPath $outputPath -AllowApiOnlyTrustedKickoff
   if ($LASTEXITCODE -ne 0) { throw "build_api_football_universe fallo con exit code $LASTEXITCODE" }
 
   $payload = Get-Content -LiteralPath $outputPath -Raw | ConvertFrom-Json
@@ -188,14 +190,14 @@ function Invoke-MlbContextRefresh {
   Write-Step "MLB context refresh"
   try {
     if (-not [string]::IsNullOrWhiteSpace($SportsDataIoApiKey)) {
-      & (Join-Path $PSScriptRoot "run_auto_mlb_real_paper.cmd") -Date $Date -ForceEntry -InternalApiKey $InternalApiKey -SportsDataIoApiKey $SportsDataIoApiKey
+      & (Join-Path $ScriptRoot "run_auto_mlb_real_paper.cmd") -Date $Date -ForceEntry -InternalApiKey $InternalApiKey -SportsDataIoApiKey $SportsDataIoApiKey
       if ($LASTEXITCODE -ne 0) { Write-Host "[mlb-entry] warning exit=$LASTEXITCODE" -ForegroundColor Yellow }
     } else {
       Write-Host "[mlb-entry] SPORTSDATAIO_API_KEY no disponible; salto ForceEntry." -ForegroundColor Yellow
     }
 
     $templatePath = Join-Path $RepoRoot ("workers\mlb_matchup_features_template_{0}.csv" -f ([datetime]::Parse($Date)).ToString("yyyyMMdd"))
-    & (Join-Path $PSScriptRoot "run_mlb_matchup_features.cmd") -Mode GenerateTemplate -OutputPath $templatePath
+    & (Join-Path $ScriptRoot "run_mlb_matchup_features.cmd") -Mode GenerateTemplate -OutputPath $templatePath
     if ($LASTEXITCODE -ne 0) { Write-Host "[mlb-features] warning exit=$LASTEXITCODE" -ForegroundColor Yellow }
   } catch {
     Write-Host "[mlb-context] warning: $($_.Exception.Message)" -ForegroundColor Yellow

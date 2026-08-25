@@ -2,7 +2,7 @@ param(
   [string]$HubBaseUrl = "http://127.0.0.1:4000",
   [string]$InternalApiKey = $(if ($env:INTERNAL_API_KEY) { $env:INTERNAL_API_KEY } else { $env:SPORTS_DATA_HUB_INTERNAL_KEY }),
   [string]$Date = "",
-  [string]$ModelName = "sports_data_hub_football_fair_odds_v1",
+  [string]$ModelName = "sports_data_hub_football_fair_odds_v3",
   [double]$MinEv = 0.03,
   [double]$MinShadowConfidence = 0.50,
   [int]$Limit = 80,
@@ -51,6 +51,7 @@ if ($HistoricalBridge) {
 $body = @{
   apply = [bool]$Apply
   model_name = $ModelName
+  model_version = $(if ($ModelName -eq "sports_data_hub_football_fair_odds_v2") { "v2" } else { "v3" })
   min_ev = $MinEv
   limit = $Limit
   include_totals_2_5 = [bool]$IncludeTotals25

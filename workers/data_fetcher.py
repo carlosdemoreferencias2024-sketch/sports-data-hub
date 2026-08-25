@@ -64,7 +64,7 @@ def _team_stats(conn, team_id: str, lookback_games: int) -> TeamDerivedStats:
             ELSE 0.0
           END AS won
         FROM match_competitors mc
-        JOIN matches m ON m.id = mc.match_id
+        JOIN v_valid_matches m ON m.id = mc.match_id
         WHERE mc.team_id = %s
           AND m.status = 'finished'
           AND mc.score IS NOT NULL
@@ -113,7 +113,7 @@ def fetch_active_match_rows(conn, include_live: bool, league_slug: str | None) -
               m.match_date DESC,
               m.updated_at DESC
           ) AS logical_rank
-        FROM matches m
+        FROM v_valid_matches m
         JOIN leagues l ON l.id = m.league_id
         JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
         JOIN match_competitors away_mc ON away_mc.match_id = m.id AND away_mc.home_away = 'away'

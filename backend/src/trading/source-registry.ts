@@ -17,12 +17,15 @@ export const MANUAL_VERIFIED_SOURCES: ManualVerifiedSource[] = [
   "official_club_manual_verified",
   "official_league_manual_verified",
   "espn_manual_verified",
+  "foxsports_manual_verified",
   "google_result_manual_verified",
   "sportsbook_manual_verified",
   "bookmaker_manual_verified",
   "sportsdataio_manual_verified",
   "mlb_official_manual_verified",
   "mlb_stats_manual_verified",
+  "nfl_official_manual_verified",
+  "nfl_inactives_manual_verified",
   "weather_manual_verified"
 ].map((sourceName) => ({
   source_name: sourceName,

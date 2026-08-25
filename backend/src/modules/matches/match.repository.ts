@@ -69,7 +69,7 @@ export class MatchRepository {
             )
             ORDER BY CASE mc.home_away WHEN 'away' THEN 0 ELSE 1 END
           ) AS competitors
-        FROM matches m
+        FROM v_valid_matches m
         JOIN leagues l ON l.id = m.league_id
         JOIN sports s ON s.id = l.sport_id
         JOIN match_competitors mc ON mc.match_id = m.id
@@ -108,7 +108,7 @@ export class MatchRepository {
             )
             ORDER BY CASE mc.home_away WHEN 'away' THEN 0 ELSE 1 END
           ) AS competitors
-        FROM matches m
+        FROM v_valid_matches m
         JOIN leagues l ON l.id = m.league_id
         JOIN sports s ON s.id = l.sport_id
         LEFT JOIN venues v ON v.id = m.venue_id
@@ -148,7 +148,7 @@ export class MatchRepository {
           ), 0)::int AS points_against
         FROM teams t
         LEFT JOIN match_competitors mc ON mc.team_id = t.id
-        LEFT JOIN matches m ON m.id = mc.match_id AND m.status = 'finished'
+        LEFT JOIN v_valid_matches m ON m.id = mc.match_id AND m.status = 'finished'
         WHERE t.id = $1
         GROUP BY t.id;
       `,
@@ -182,7 +182,7 @@ export class MatchRepository {
                 ELSE 0
               END
             ), 0)::int AS points
-          FROM matches m
+          FROM v_valid_matches m
           JOIN leagues l ON l.id = m.league_id
           JOIN match_competitors mc ON mc.match_id = m.id
           JOIN match_competitors opp ON opp.match_id = m.id AND opp.team_id <> mc.team_id
@@ -240,7 +240,7 @@ export class MatchRepository {
           END AS result
         FROM teams t
         JOIN match_competitors mc ON mc.team_id = t.id
-        JOIN matches m ON m.id = mc.match_id
+        JOIN v_valid_matches m ON m.id = mc.match_id
         JOIN leagues l ON l.id = m.league_id
         JOIN match_competitors opp ON opp.match_id = m.id AND opp.team_id <> t.id
         JOIN teams ot ON ot.id = opp.team_id

@@ -7,6 +7,8 @@ param(
   [double]$MinEv = 0.03,
   [int]$MaxModelAgeMinutes = 240,
   [int]$MaxMarketAgeMinutes = 30,
+  [ValidateSet("market", "entry", "closing")]
+  [string]$SnapshotRole = "market",
   [switch]$QuotesOnly,
   [switch]$DryRun
 )
@@ -67,7 +69,8 @@ function Normalize-Quote {
     source = "real_paper_mlb_moneyline_from_json"
     processed = $true
     bookmaker = $bookmaker
-    snapshot_role = $(if ($QuotesOnly) { "closing" } else { "market" })
+    snapshot_role = $SnapshotRole
+    snapshot_type = $SnapshotRole
     real_paper_only = $true
     real_bet_allowed = $false
     kelly_enabled = $false
@@ -82,6 +85,23 @@ function Normalize-Quote {
   if (Test-HasProperty $Item "home_team") { $rawData.home_team = [string]$Item.home_team }
   if (Test-HasProperty $Item "away_team") { $rawData.away_team = [string]$Item.away_team }
   if (Test-HasProperty $Item "notes") { $rawData.notes = [string]$Item.notes }
+  foreach ($evidenceField in @(
+    "source_url",
+    "source_type",
+    "evidence_id",
+    "raw_payload_hash",
+    "verified_by",
+    "safe_for_entry",
+    "safe_for_closing",
+    "audit_only",
+    "stale_status",
+    "window_status",
+    "closing_quality"
+  )) {
+    if (Test-HasProperty $Item $evidenceField) {
+      $rawData[$evidenceField] = $Item.$evidenceField
+    }
+  }
 
   $quote = @{
     match_id = [string]$Item.match_id
@@ -110,7 +130,7 @@ foreach ($item in $items) {
 
 $payload = @{ quotes = $quotes } | ConvertTo-Json -Depth 12
 
-Write-Host "[real-paper] quotes=$($quotes.Count) provider=$($quotes[0].provider_name) mode=MLB_MONEYLINE_ONLY dry_run=$DryRun"
+Write-Host "[real-paper] quotes=$($quotes.Count) provider=$($quotes[0].provider_name) role=$SnapshotRole mode=MLB_MONEYLINE_ONLY dry_run=$DryRun"
 
 if ($DryRun) {
   $payload

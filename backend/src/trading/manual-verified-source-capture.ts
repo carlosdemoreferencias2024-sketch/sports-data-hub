@@ -1,5 +1,6 @@
 import { getManualVerifiedSource } from "./source-registry.js";
 import { closingWindowDiagnostics, tradingLocalDate, tradingLocalDateWindow } from "./timezone.js";
+import { recordForecastContext, recordForecastEvidence } from "./forecast-chain.js";
 
 type Queryable = {
   query: (sql: string, values?: unknown[]) => Promise<{ rows: Record<string, any>[] }>;
@@ -47,6 +48,7 @@ function normalizedSport(value: unknown) {
   const sport = String(value || "").trim().toLowerCase();
   if (["soccer", "football", "futbol", "fútbol"].includes(sport)) return "soccer";
   if (["baseball", "mlb"].includes(sport)) return "baseball";
+  if (["nfl", "american-football", "american_football", "american football"].includes(sport)) return "american_football";
   throw new Error("sport_invalid");
 }
 
@@ -65,6 +67,44 @@ function parseConfidence(value: unknown, fallback: number) {
 function dataObject(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return value as Record<string, any>;
+}
+
+function decimalOdds(value: unknown, format: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric === 0) return null;
+  const normalizedFormat = String(format || "").toLowerCase();
+  const american = normalizedFormat === "american"
+    || numeric <= -100
+    || (typeof value === "string" && value.trim().startsWith("+"));
+  if (american && numeric >= 100) return 1 + numeric / 100;
+  if (american && numeric <= -100) return 1 + 100 / Math.abs(numeric);
+  if (numeric > 1) return numeric;
+  return null;
+}
+
+function normalizedMarketRows(data: Record<string, any>, sport: string) {
+  const direct = Array.isArray(data.odds) ? data.odds : [];
+  const normalized = Array.isArray(data.normalized_event?.odds) ? data.normalized_event.odds : [];
+  const rows = [...direct, ...normalized];
+  const seen = new Set<string>();
+  return rows.flatMap((row) => {
+    if (!row || typeof row !== "object") return [];
+    const selection = String(row.selection || row.side || row.outcome || row.name || "").trim().toLowerCase();
+    if (!selection || !["home", "draw", "away", "over", "under"].includes(selection)) return [];
+    const rawOdds = row.decimal_odds ?? row.odds ?? row.price ?? row.value;
+    const parsed = decimalOdds(rawOdds, row.odds_format || row.format);
+    if (!parsed || parsed <= 1) return [];
+    const marketType = String(row.market_type || row.market || (sport === "soccer" ? "moneyline_3way" : "moneyline_2way"));
+    const key = `${marketType}:${selection}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [{
+      marketType,
+      selection,
+      decimalOdds: parsed,
+      line: Number.isFinite(Number(row.line)) ? Number(row.line) : null
+    }];
+  });
 }
 
 function boolReady(value: unknown) {
@@ -145,6 +185,10 @@ function computeCapturePatch(
     patch.goalkeeper_away = typeof data.goalkeeper_away === "string" ? data.goalkeeper_away.trim() : null;
     patch.goalkeeper_ready = Boolean(patch.goalkeeper_home && patch.goalkeeper_away);
     patch.goalkeeper_status = patch.goalkeeper_ready ? "MANUAL_VERIFIED_COMPLETE" : "MANUAL_VERIFIED_PARTIAL";
+    patch.home_goalkeeper_status = data.home_goalkeeper_status || (patch.goalkeeper_home ? "confirmed_starting" : "unknown");
+    patch.away_goalkeeper_status = data.away_goalkeeper_status || (patch.goalkeeper_away ? "confirmed_starting" : "unknown");
+    patch.home_goalkeeper_impact = data.home_goalkeeper_impact ?? null;
+    patch.away_goalkeeper_impact = data.away_goalkeeper_impact ?? null;
     if (patch.goalkeeper_ready) missingResolved.push("goalkeeper");
     else dataStatus = "PARTIAL_ACCEPTED";
   }
@@ -153,6 +197,8 @@ function computeCapturePatch(
     patch[captureType] = data[captureType] || data.unavailable_players || [];
     patch.unavailable_players = data.unavailable_players || patch[captureType] || [];
     patch.player_availability_manual_verified = true;
+    patch.home_absence_impact = data.home_absence_impact ?? null;
+    patch.away_absence_impact = data.away_absence_impact ?? null;
     dataStatus = Number(data.confidence_score || 0) < 70 ? "STORED_FOR_AUDIT_ONLY" : "ACCEPTED";
     usedByPreflight = dataStatus === "ACCEPTED";
     missingResolved.push("player_availability_context");
@@ -163,6 +209,13 @@ function computeCapturePatch(
     if (!statusAllowed(status)) throw new Error("match_status_invalid");
     patch.manual_verified_match_status = status;
     patch.match_status_ready = true;
+    if (data.knockout && typeof data.knockout === "object") patch.knockout = data.knockout;
+    if (Number.isFinite(Number(data.competition_strength))) patch.competition_strength = Number(data.competition_strength);
+    const schedule = data.normalized_event?.schedule_context;
+    if (schedule && typeof schedule === "object") {
+      patch.home_rest_days = schedule.home_rest_days ?? null;
+      patch.away_rest_days = schedule.away_rest_days ?? null;
+    }
     missingResolved.push("match_status");
   }
 
@@ -216,7 +269,7 @@ function computeCapturePatch(
     patch.closing_ready = quality === "CAPTURED_ON_TIME";
     if (patch.closing_ready) missingResolved.push("closing_odds_snapshot", "clv_valid_for_segments");
     else {
-      dataStatus = quality;
+      dataStatus = quality || "UNKNOWN";
       usedByPreflight = false;
       notes.push(closingWindow.why_invalid || "Closing is visible but excluded from formal CLV/segments unless CAPTURED_ON_TIME.");
     }
@@ -278,7 +331,7 @@ async function updateJsonbRawData(db: Queryable, table: string, idColumn: string
         true
       ) || $3::jsonb
     WHERE ${idColumn} = $1::uuid
-    RETURNING id
+    RETURNING id, raw_data
   `;
   return db.query(sql, [idValue, JSON.stringify(history), JSON.stringify(patch)]);
 }
@@ -340,11 +393,20 @@ export async function recordManualVerifiedSourceCapture(db: Queryable, body: Man
   const data = dataObject(body.data);
 
   const match = await db.query(
-    `SELECT id, match_date, status FROM matches WHERE id = $1::uuid LIMIT 1`,
+    `SELECT id, match_date, status FROM v_valid_matches WHERE id = $1::uuid LIMIT 1`,
     [matchId]
   );
   if (!match.rows.length) throw new Error("match_id_not_found");
   const kickoff = match.rows[0].match_date ? new Date(match.rows[0].match_date).toISOString() : null;
+  const prospectiveCapture = [
+    "lineup", "goalkeeper", "injuries", "suspensions", "match_status",
+    "current_odds", "closing_odds", "weather", "pitcher"
+  ].includes(captureType);
+  if (kickoff && prospectiveCapture) {
+    const kickoffMs = new Date(kickoff).getTime();
+    if (new Date(capturedAt).getTime() >= kickoffMs) throw new Error("post_kickoff_capture_rejected");
+    if (Date.now() >= kickoffMs) throw new Error("prospective_window_closed");
+  }
   const computed = computeCapturePatch(sport, captureType, data, capturedAt, kickoff);
   const fingerprint = [
     hashPart(matchId),
@@ -393,6 +455,103 @@ export async function recordManualVerifiedSourceCapture(db: Queryable, body: Man
     sport === "baseball" ? updateMlbSnapshots(db, matchId, patch, history) : Promise.resolve({ rows: [] as Record<string, any>[] })
   ]);
 
+  await db.query("SELECT * FROM register_forecast_match($1::uuid)", [matchId]);
+
+  const normalizedEvent = data.normalized_event && typeof data.normalized_event === "object"
+    ? data.normalized_event as Record<string, any>
+    : null;
+  if (normalizedEvent && ["match_status", "current_odds", "closing_odds"].includes(captureType)) {
+    const canonicalKickoff = parseDate(normalizedEvent.starts_at || data.scheduled_kickoff, "canonical_kickoff");
+    await db.query(
+      "SELECT * FROM validate_forecast_schedule($1::uuid, false, false, $2::timestamptz, NULL, $3)",
+      [matchId, canonicalKickoff, verifiedBy]
+    );
+    const externalMatchId = String(data.provider_event_id || normalizedEvent.source_event_id || "").trim();
+    const providerName = String(data.provider || normalizedEvent.source || sourceName).trim().toLowerCase();
+    if (externalMatchId) {
+      await db.query(
+        "SELECT * FROM register_forecast_provider_mapping($1::uuid, $2, $3, NULL, $4)",
+        [matchId, providerName, externalMatchId, verifiedBy]
+      );
+    }
+  }
+
+  const rawPayloadHash = String(data.upstream_evidence_sha256 || data.provider_raw_sha256 || "").trim().toLowerCase();
+  const forecastEvidence: Record<string, any>[] = [];
+  if (ODDS_CAPTURE_TYPES.has(captureType)) {
+    const screenshotSha256 = String(data.screenshot_sha256 || "").trim().toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(rawPayloadHash)) throw new Error("forecast_market_raw_payload_hash_required");
+    if (!/^[a-f0-9]{64}$/.test(screenshotSha256)) throw new Error("forecast_market_screenshot_sha256_required");
+    const rows = normalizedMarketRows(data, sport);
+    const requiredSelections = sport === "soccer" ? ["home", "draw", "away"] : ["home", "away"];
+    if (!requiredSelections.every((selection) => rows.some((row) => row.selection === selection))) {
+      throw new Error("forecast_market_all_sides_required");
+    }
+    for (const row of rows) {
+      forecastEvidence.push(await recordForecastEvidence({
+        matchId,
+        sourceType: "manual_verified",
+        providerName: String(data.provider || sourceName),
+        bookmaker: String(data.bookmaker || "").trim(),
+        marketType: row.marketType,
+        selection: row.selection,
+        line: row.line,
+        oddsValue: row.decimalOdds,
+        oddsFormat: "decimal",
+        decimalOdds: row.decimalOdds,
+        capturedAt,
+        timingQuality: captureType === "closing_odds"
+          ? (computed.closing_quality === "CAPTURED_ON_TIME" ? "CAPTURED_ON_TIME" : "LATE")
+          : "UNKNOWN",
+        sourceUrl,
+        screenshotSha256,
+        verifiedBy,
+        verificationNotes: `Imported from ${sourceName}; ${captureType}`,
+        rawPayloadHash,
+        evidenceRole: captureType === "closing_odds" ? "closing" : (data.snapshot_type === "entry" ? "entry" : "current")
+      }));
+    }
+  } else if (/^[a-f0-9]{64}$/.test(rawPayloadHash)) {
+    const mergedRawData: Record<string, any> = matchesUpdated.rows[0]?.raw_data && typeof matchesUpdated.rows[0].raw_data === "object"
+      ? matchesUpdated.rows[0].raw_data as Record<string, any>
+      : patch as Record<string, any>;
+    const missingFields: string[] = [];
+    const lineupConfirmed = Boolean(mergedRawData.lineup_ready);
+    const goalkeeperConfirmed = sport === "soccer" ? Boolean(mergedRawData.goalkeeper_ready) : true;
+    const battingOrderComplete = sport === "baseball" ? Boolean(mergedRawData.batting_order_complete) : true;
+    const pitchersConfirmed = sport === "baseball"
+      ? Boolean(mergedRawData.probable_pitcher_home && mergedRawData.probable_pitcher_away)
+      : true;
+    const bullpenContextComplete = sport === "baseball" ? Boolean(mergedRawData.bullpen_context_complete) : true;
+    const availabilityComplete = sport === "soccer" ? Boolean(mergedRawData.player_availability_manual_verified) : true;
+    if (!lineupConfirmed) missingFields.push("official_lineups");
+    if (!goalkeeperConfirmed) missingFields.push("goalkeepers");
+    if (!battingOrderComplete) missingFields.push("batting_order");
+    if (!pitchersConfirmed) missingFields.push("pitchers");
+    if (!bullpenContextComplete) missingFields.push("bullpen");
+    if (!availabilityComplete) missingFields.push("availability");
+    await recordForecastContext({
+      matchId,
+      capturedAt,
+      lineupConfirmed,
+      battingOrderComplete,
+      pitchersConfirmed,
+      bullpenContextComplete,
+      goalkeeperConfirmed,
+      injuries: { unavailable_players: mergedRawData.unavailable_players || [] },
+      missingFields,
+      notes: `Aggregated verified context after ${captureType}`,
+      completeness: missingFields.length === 0 ? "complete" : "partial",
+      sourceUrl,
+      sourcePayloadHash: rawPayloadHash,
+      captureMode: "LIVE_FORWARD",
+      sourcePublishedAt: capturedAt,
+      sourceAsOfAt: capturedAt,
+      replayVerifiedBy: verifiedBy,
+      noPostEventDataAttested: true
+    });
+  }
+
   return {
     system_status: "MANUAL_VERIFIED_SOURCE_CAPTURE_SAFE_V1",
     applied: true,
@@ -409,6 +568,7 @@ export async function recordManualVerifiedSourceCapture(db: Queryable, body: Man
     updated_matches: matchesUpdated.rows.length,
     updated_football_shadow_tickets: footballTickets.rows.length,
     updated_mlb_snapshots: mlbSnapshots.rows.length,
+    forecast_evidence_ids: forecastEvidence.map((row) => row.id),
     notes: computed.notes,
     rows: [...footballTickets.rows, ...mlbSnapshots.rows],
     guardrails: {
@@ -439,7 +599,7 @@ export async function getManualVerifiedSourceCaptureStatus(db: Queryable, input:
           pt.raw_data->'manual_verified_source_capture_latest' AS capture,
           pt.raw_data
         FROM paper_trades pt
-        LEFT JOIN matches m ON m.id = pt.match_id
+        LEFT JOIN v_valid_matches m ON m.id = pt.match_id
         WHERE pt.league_type = 'football_shadow'
           AND pt.raw_data ? 'manual_verified_source_capture_latest'
       ),
@@ -453,7 +613,7 @@ export async function getManualVerifiedSourceCaptureStatus(db: Queryable, input:
           rps.raw_data->'manual_verified_source_capture_latest' AS capture,
           rps.raw_data
         FROM real_paper_snapshots rps
-        LEFT JOIN matches m ON m.id = rps.match_id
+        LEFT JOIN v_valid_matches m ON m.id = rps.match_id
         LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
         LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
         LEFT JOIN match_competitors away_mc ON away_mc.match_id = m.id AND away_mc.home_away = 'away'

@@ -19,6 +19,7 @@ function normalizeSport(input?: string) {
   const sport = String(input || "all").toLowerCase();
   if (["football", "soccer", "futbol", "fútbol"].includes(sport)) return "soccer";
   if (["baseball", "mlb"].includes(sport)) return "baseball";
+  if (["nfl", "american-football", "american_football", "american football"].includes(sport)) return "american_football";
   return "all";
 }
 
@@ -34,7 +35,9 @@ function nextAction(status: string, sport: string) {
   if (status === "IN_VALID_CLOSING_WINDOW") {
     return sport === "baseball"
       ? "Run MLB ForceClosing only with verified market odds."
-      : "Capture verified bookmaker closing now; apply only if CAPTURED_ON_TIME.";
+      : sport === "american_football"
+        ? "Capture verified NFL bookmaker closing now; apply only if CAPTURED_ON_TIME."
+        : "Capture verified bookmaker closing now; apply only if CAPTURED_ON_TIME.";
   }
   if (status === "MISSED_WINDOW") return "Do not backfill pregame closing; keep post-kickoff audit only.";
   if (status === "CAPTURED_TOO_EARLY") return "Keep visible but exclude from CLV/segments; recapture in valid window if still possible.";

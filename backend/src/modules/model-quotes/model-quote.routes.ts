@@ -3,6 +3,7 @@ import { z } from "zod";
 import { db } from "../../db/index.js";
 import { AppError } from "../../shared/http-errors.js";
 import { processFootballShadowFeed } from "../../trading/football-market-lab.js";
+import { shadowCandidatePreflightPassed } from "../../trading/shadow-candidate-preflight-gate.js";
 import {
   asNumber,
   auditParlayLegs,
@@ -10,6 +11,10 @@ import {
   isManualProvider,
   isRunLineDiagnosticProvider
 } from "./audit-guardrails.js";
+
+const ACTIVE_FOOTBALL_FAIR_ODDS_MODEL = process.env.FOOTBALL_FAIR_ODDS_ACTIVE_VERSION === "v2"
+  ? "sports_data_hub_football_fair_odds_v2"
+  : "sports_data_hub_football_fair_odds_v3";
 
 const opportunitiesQuerySchema = z.object({
   model_name: z.string().min(1).max(80).optional(),
@@ -62,8 +67,9 @@ const smartSelectionQuerySchema = z.object({
 });
 
 const ownedFairOddsBridgeQuerySchema = z.object({
+  match_id: z.string().uuid().optional(),
   sport: z.string().min(1).max(40).default("soccer"),
-  model_name: z.string().min(1).max(80).default("sports_data_hub_football_fair_odds_v1"),
+  model_name: z.string().min(1).max(80).default(ACTIVE_FOOTBALL_FAIR_ODDS_MODEL),
   mode: z.enum(["live", "historical"]).default("live"),
   date: z.string().optional(),
   min_ev: z.coerce.number().default(0.03),
@@ -258,7 +264,7 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
           COALESCE(pem.home_team_name, home_comp.team_name) AS home_team_name,
           COALESCE(pem.away_team_name, away_comp.team_name) AS away_team_name
         FROM latest_model_quotes mq
-        JOIN matches m ON m.id = mq.match_id
+        JOIN v_valid_matches m ON m.id = mq.match_id
         LEFT JOIN provider_event_mappings pem ON pem.hub_match_id = mq.match_id AND pem.is_active = TRUE
         LEFT JOIN LATERAL (
           SELECT t.name AS team_name
@@ -369,7 +375,7 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
           SELECT DISTINCT ON (mq.match_id, mq.model_name, mq.market_type, COALESCE(mq.line, -9999))
             mq.*
           FROM model_quotes mq
-          JOIN matches m ON m.id = mq.match_id
+          JOIN v_valid_matches m ON m.id = mq.match_id
           JOIN leagues l ON l.id = m.league_id
           JOIN sports s ON s.id = l.sport_id
           WHERE mq.confidence >= $1
@@ -417,7 +423,7 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
             END AS best_fair_odds,
             mq.generated_at
           FROM latest_model_quotes mq
-          JOIN matches m ON m.id = mq.match_id
+          JOIN v_valid_matches m ON m.id = mq.match_id
           JOIN leagues l ON l.id = m.league_id
           JOIN sports s ON s.id = l.sport_id
           LEFT JOIN provider_event_mappings pem ON pem.hub_match_id = mq.match_id AND pem.is_active = TRUE
@@ -511,7 +517,8 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
       query.limit,
       query.date ?? "",
       query.mode,
-      query.min_shadow_confidence
+      query.min_shadow_confidence,
+      query.match_id ?? ""
     ];
 
     const result = await db.query(
@@ -520,12 +527,13 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
           SELECT DISTINCT ON (mq.match_id, mq.model_name, mq.market_type, COALESCE(mq.line, -9999))
             mq.*
           FROM model_quotes mq
-          JOIN matches m ON m.id = mq.match_id
+          JOIN v_valid_matches m ON m.id = mq.match_id
           JOIN leagues l ON l.id = m.league_id
           JOIN sports s ON s.id = l.sport_id
           WHERE mq.model_name = $1
             AND s.slug = $2
             AND mq.confidence >= $3
+            AND ($11::text = '' OR mq.match_id = $11::uuid)
             AND (
               ($8::text = '' AND mq.generated_at >= NOW() - ($4::int * INTERVAL '1 minute'))
               OR (
@@ -576,7 +584,7 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
             selection.model_fair_odds,
             selection.min_market_odds_for_ev
           FROM latest_model_quotes mq
-          JOIN matches m ON m.id = mq.match_id
+          JOIN v_valid_matches m ON m.id = mq.match_id
           JOIN leagues l ON l.id = m.league_id
           JOIN sports s ON s.id = l.sport_id
           LEFT JOIN provider_event_mappings pem ON pem.hub_match_id = mq.match_id AND pem.is_active = TRUE
@@ -873,6 +881,7 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
       model_name: query.model_name,
       sport: query.sport,
       mode: query.mode,
+      match_id: query.match_id ?? null,
       date: query.date ?? null,
       min_ev: query.min_ev,
       min_shadow_confidence: query.min_shadow_confidence,
@@ -918,8 +927,12 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
       ...(rawBody && typeof rawBody === "object" ? rawBody as Record<string, unknown> : {})
     };
     const query = ownedFairOddsShadowRegisterQuerySchema.parse(input);
+    if (query.apply && !query.match_id) {
+      throw new AppError(400, "match_id is required when apply=true");
+    }
     const dryRun = query.apply ? false : query.dry_run;
     const bridge = await buildOwnedFairOddsBridge({
+      match_id: query.match_id,
       sport: query.sport,
       model_name: query.model_name,
       mode: query.mode,
@@ -934,8 +947,55 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
 
     const rows = Array.isArray(bridge.rows) ? bridge.rows as Array<Record<string, any>> : [];
     const readyRows = rows.filter((row) => String(row.bridge_status || "") === "READY_FOR_SHADOW_REVIEW");
+    const hardAuditFlags = new Set([
+      "CALIBRATING_CAP",
+      "UNCALIBRATED_PRIOR_CAP",
+      "MODEL_MARKET_GAP_HIGH",
+      "EXTREME_EV_AUDIT"
+    ]);
+    const auditBlockedRows = readyRows.filter((row) => {
+      const flags = Array.isArray(row.audit_flags) ? row.audit_flags.map(String) : [];
+      return flags.some((flag) => hardAuditFlags.has(flag));
+    });
+    const eligibleReadyRows = readyRows.filter((row) => !auditBlockedRows.includes(row));
+    const candidateMatchIds = Array.from(new Set(
+      eligibleReadyRows.map((row) => String(row.match_id || "")).filter(Boolean)
+    ));
+    const candidateSnapshots = candidateMatchIds.length > 0
+      ? await db.query(
+        `
+          SELECT DISTINCT ON (match_id)
+            match_id,
+            id,
+            verdict,
+            reasons_json,
+            decision_as_of,
+            verify_candidate_snapshot(id) AS hash_valid
+          FROM forecast_candidate_snapshots
+          WHERE match_id = ANY($1::uuid[])
+            AND decision_as_of >= NOW() - INTERVAL '5 minutes'
+          ORDER BY match_id, decision_as_of DESC, created_at DESC
+        `,
+        [candidateMatchIds]
+      )
+      : { rows: [] as Record<string, any>[] };
+    const candidateSnapshotByMatch = new Map(
+      candidateSnapshots.rows.map((row) => [String(row.match_id), row])
+    );
+    const candidateBlockedRows = eligibleReadyRows.filter((row) => {
+      const snapshot = candidateSnapshotByMatch.get(String(row.match_id || ""));
+      return !shadowCandidatePreflightPassed(snapshot);
+    });
+    const candidateEligibleRows = eligibleReadyRows.filter((row) => !candidateBlockedRows.includes(row));
+    const selectedMatchIds = new Set<string>();
+    const selectedRows = candidateEligibleRows.filter((row) => {
+      const matchId = String(row.match_id || "");
+      if (!matchId || selectedMatchIds.has(matchId)) return false;
+      selectedMatchIds.add(matchId);
+      return true;
+    });
     const now = new Date();
-    const signals = readyRows
+    const signals = selectedRows
       .filter((row) => {
         const kickoff = new Date(String(row.match_date || ""));
         return Number.isNaN(kickoff.getTime()) || kickoff.getTime() > now.getTime();
@@ -1018,7 +1078,7 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
           && Number.isFinite(signal.expected_value);
       });
 
-    const postKickoffSkipped = readyRows.length - signals.length;
+    const postKickoffSkipped = selectedRows.length - signals.length;
     const feed = await processFootballShadowFeed(db, {
       dry_run: dryRun,
       signals: signals as Parameters<typeof processFootballShadowFeed>[1]["signals"]
@@ -1026,12 +1086,17 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
 
     return {
       system_status: "FOOTBALL_OWNED_FAIR_ODDS_SHADOW_REVIEW_REGISTER",
+      match_id: query.match_id ?? null,
       date: query.date ?? null,
       dry_run: dryRun,
       apply_requested: query.apply,
       bridge_summary: bridge.summary,
       scanned_bridge_rows: rows.length,
       ready_for_shadow_review: readyRows.length,
+      audit_blocked: auditBlockedRows.length,
+      candidate_preflight_blocked: candidateBlockedRows.length,
+      candidate_preflight_required: true,
+      selected_one_per_match: selectedRows.length,
       post_kickoff_skipped: postKickoffSkipped,
       signals_prepared: signals.length,
       feed_summary: {
@@ -1075,7 +1140,7 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
             s.slug AS sport_slug,
             l.slug AS league_slug
           FROM model_quotes mq
-          JOIN matches m ON m.id = mq.match_id
+          JOIN v_valid_matches m ON m.id = mq.match_id
           JOIN match_competitors mq_home
             ON mq_home.match_id = m.id
            AND mq_home.home_away = 'home'
@@ -1086,7 +1151,7 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
           JOIN sports s ON s.id = l.sport_id
           JOIN LATERAL (
             SELECT fm.id, fm.home_score, fm.away_score
-            FROM matches fm
+            FROM v_valid_matches fm
             JOIN match_competitors final_home
               ON final_home.match_id = fm.id
              AND final_home.home_away = 'home'
@@ -1321,7 +1386,7 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
             EXTRACT(EPOCH FROM (NOW() - ao.detected_at))::int AS age_seconds,
             ao.detected_at
           FROM alpha_opportunities ao
-          JOIN matches m ON m.id = ao.match_id
+          JOIN v_valid_matches m ON m.id = ao.match_id
           LEFT JOIN provider_event_mappings pem ON pem.hub_match_id = ao.match_id AND pem.is_active = TRUE
           LEFT JOIN LATERAL (
             SELECT t.name AS team_name
@@ -1665,7 +1730,7 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
             ELSE NULL
           END AS latest_same_provider_odds
         FROM real_paper_snapshots rps
-        JOIN matches m ON m.id = rps.match_id
+        JOIN v_valid_matches m ON m.id = rps.match_id
         JOIN market_quotes entry_quote ON entry_quote.id = rps.market_quote_id
         LEFT JOIN provider_event_mappings pem ON pem.hub_match_id = rps.match_id AND pem.is_active = TRUE
         LEFT JOIN LATERAL (
@@ -2150,7 +2215,7 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
           SELECT DISTINCT ON (mq.match_id, mq.model_name, mq.market_type, COALESCE(mq.line, -9999))
             mq.*
           FROM model_quotes mq
-          JOIN matches m ON m.id = mq.match_id
+          JOIN v_valid_matches m ON m.id = mq.match_id
           JOIN leagues l ON l.id = m.league_id
           JOIN sports s ON s.id = l.sport_id
           WHERE m.status::text IN ('scheduled', 'live')
@@ -2196,7 +2261,7 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
             ON mk.match_id = mq.match_id
            AND mk.market_type = mq.market_type
            AND COALESCE(mk.line, -9999) = COALESCE(mq.line, -9999)
-          JOIN matches m ON m.id = mq.match_id
+          JOIN v_valid_matches m ON m.id = mq.match_id
           JOIN leagues l ON l.id = m.league_id
           JOIN sports s ON s.id = l.sport_id
           LEFT JOIN provider_event_mappings pem ON pem.hub_match_id = mq.match_id AND pem.is_active = TRUE
@@ -2337,7 +2402,7 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
             EXTRACT(EPOCH FROM (NOW() - ao.detected_at))::int AS age_seconds,
             ao.detected_at
           FROM alpha_opportunities ao
-          JOIN matches m ON m.id = ao.match_id
+          JOIN v_valid_matches m ON m.id = ao.match_id
           JOIN model_quotes mq ON mq.id = ao.model_quote_id
           LEFT JOIN provider_event_mappings pem ON pem.hub_match_id = ao.match_id AND pem.is_active = TRUE
           LEFT JOIN LATERAL (
@@ -2474,7 +2539,7 @@ export async function modelQuoteRoutes(app: FastifyInstance) {
             updated.processed,
             updated.detected_at
           FROM updated
-          JOIN matches m ON m.id = updated.match_id
+          JOIN v_valid_matches m ON m.id = updated.match_id
           LEFT JOIN provider_event_mappings pem ON pem.hub_match_id = updated.match_id AND pem.is_active = TRUE
           LEFT JOIN LATERAL (
             SELECT t.name AS team_name

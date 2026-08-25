@@ -21,7 +21,7 @@ def _team_net_rating(conn, team_id: str, lookback_games: int) -> dict[str, float
             ELSE m.home_score::float
           END AS points_against
         FROM match_competitors mc
-        JOIN matches m ON m.id = mc.match_id
+        JOIN v_valid_matches m ON m.id = mc.match_id
         WHERE mc.team_id = %s
           AND m.status = 'finished'
           AND mc.score IS NOT NULL
@@ -61,7 +61,7 @@ def fetch_nba_features(model_name: str, lookback_games: int, include_live: bool,
               away_mc.team_id,
               home_team.name AS home_team_name,
               away_team.name AS away_team_name
-            FROM matches m
+            FROM v_valid_matches m
             JOIN leagues l ON l.id = m.league_id
             JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
             JOIN match_competitors away_mc ON away_mc.match_id = m.id AND away_mc.home_away = 'away'

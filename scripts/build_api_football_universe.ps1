@@ -35,7 +35,7 @@ function Invoke-ApiFootballJson([string]$Uri) {
   $headers = @("x-apisports-key: $ApiKey")
   $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
   if ($curl) {
-    $body = & curl.exe -sS --connect-timeout 30 -H $headers[0] $Uri 2>&1
+    $body = & curl.exe -sS --connect-timeout 15 --max-time 45 -H $headers[0] $Uri 2>&1
     if ($LASTEXITCODE -ne 0) {
       throw "API_FOOTBALL_CURL_FAILED exit=$LASTEXITCODE detail=$body"
     }
@@ -54,6 +54,10 @@ function Get-LeagueMeta([string]$leagueId) {
     "fifa-world-cup-2026" = @{ api_id = 1; name = "World Cup"; country = "World" }
     "uefa-champions-league" = @{ api_id = 2; name = "UEFA Champions League"; country = "World" }
     "europa-league" = @{ api_id = 3; name = "UEFA Europa League"; country = "World" }
+    "conference-league" = @{ api_id = 848; name = "UEFA Europa Conference League"; country = "World" }
+    "leagues-cup" = @{ api_id = 772; name = "Leagues Cup"; country = "World" }
+    "copa-libertadores" = @{ api_id = 13; name = "CONMEBOL Libertadores"; country = "World" }
+    "copa-sudamericana" = @{ api_id = 11; name = "CONMEBOL Sudamericana"; country = "World" }
     "premier-league" = @{ api_id = 39; name = "Premier League"; country = "England" }
     "la-liga" = @{ api_id = 140; name = "La Liga"; country = "Spain" }
     "serie-a" = @{ api_id = 135; name = "Serie A"; country = "Italy" }

@@ -37,17 +37,26 @@ const ALLOWED_CAPTURE_TYPES = new Set([
   "lineup",
   "goalkeeper",
   "result",
-  "match_status"
+  "match_status",
+  "official_inactives",
+  "starting_quarterbacks"
 ]);
 
 const MARKET_CAPTURE_TYPES = new Set(["closing_odds", "current_odds"]);
 const MARKET_SOURCES = new Set(["sportsbook_manual_verified", "bookmaker_manual_verified", "sportsdataio_manual_verified"]);
-const CONTEXT_ONLY_SOURCES = new Set(["365scores_manual_verified", "flashscore_manual_verified"]);
+const CONTEXT_ONLY_SOURCES = new Set([
+  "365scores_manual_verified",
+  "flashscore_manual_verified",
+  "espn_manual_verified",
+  "foxsports_manual_verified"
+]);
 
 function normalizeSport(value?: unknown) {
   const sport = String(value || "all").trim().toLowerCase();
   if (["soccer", "football", "futbol", "fútbol"].includes(sport)) return "soccer";
   if (["baseball", "mlb"].includes(sport)) return "baseball";
+  if (["basketball", "nba"].includes(sport)) return "basketball";
+  if (["american_football", "american-football", "nfl"].includes(sport)) return "american_football";
   return "all";
 }
 
@@ -96,7 +105,7 @@ function localDate(date?: string) {
 }
 
 function uploadRoot() {
-  return path.resolve(process.cwd(), "backend", "uploads", "source-captures");
+  return path.resolve(process.cwd(), "uploads", "source-captures");
 }
 
 function sourceSafety(sourceName: string, captureType: string, sport: string) {
@@ -128,6 +137,8 @@ function captureTypeFromMissing(row: Record<string, any>) {
   if (missing.includes("odds") || missing.includes("market")) return "current_odds";
   if (missing.includes("goalkeeper") || missing.includes("portero")) return "goalkeeper";
   if (missing.includes("lineup") || missing.includes("alineaci") || missing.includes("batting_order")) return "lineup";
+  if (missing.includes("inactive")) return "official_inactives";
+  if (missing.includes("quarterback") || missing.includes("starting_qb")) return "starting_quarterbacks";
   if (missing.includes("result") || missing.includes("score")) return "result";
   if (missing.includes("status")) return "match_status";
   return "match_status";
@@ -136,6 +147,8 @@ function captureTypeFromMissing(row: Record<string, any>) {
 function suggestedSource(captureType: string, sport: string) {
   if (MARKET_CAPTURE_TYPES.has(captureType)) return "sportsbook_manual_verified";
   if (sport === "baseball" && ["result", "match_status", "lineup"].includes(captureType)) return "mlb_stats_manual_verified";
+  if (sport === "american_football" && captureType === "official_inactives") return "nfl_inactives_manual_verified";
+  if (sport === "american_football" && ["starting_quarterbacks", "result", "match_status"].includes(captureType)) return "nfl_official_manual_verified";
   if (captureType === "result" || captureType === "match_status") return "official_league_manual_verified";
   if (captureType === "lineup" || captureType === "goalkeeper") return "official_club_manual_verified";
   return "official_league_manual_verified";
@@ -172,6 +185,17 @@ function baseDraft(input: {
       odds_timestamp: input.capture_type === "current_odds" ? capturedAt : undefined,
       closing_odds_timestamp: input.capture_type === "closing_odds" ? capturedAt : undefined,
       scheduled_kickoff: data.scheduled_kickoff || null,
+      bookmaker: data.bookmaker || null,
+      upstream_evidence_id: data.upstream_evidence_id || null,
+      upstream_evidence_sha256: data.upstream_evidence_sha256 || null,
+      provider_raw_sha256: data.provider_raw_sha256 || null,
+      scraper_context: data.normalized_event ? {
+        provider: data.provider || null,
+        provider_event_id: data.provider_event_id || data.source_event_id || null,
+        match_fingerprint: data.match_fingerprint || null,
+        competition: data.competition || null,
+        normalized_event: data.normalized_event
+      } : null,
       status: input.capture_type === "match_status" ? data.status || "REPLACE_WITH_VERIFIED_STATUS" : undefined,
       result_status: input.capture_type === "result" ? data.result_status || "FINAL" : undefined,
       home_score: input.capture_type === "result" ? data.home_score ?? "REPLACE_WITH_HOME_SCORE" : undefined,
@@ -179,7 +203,12 @@ function baseDraft(input: {
       home_lineup: input.capture_type === "lineup" ? data.home_lineup || [] : undefined,
       away_lineup: input.capture_type === "lineup" ? data.away_lineup || [] : undefined,
       goalkeeper_home: input.capture_type === "goalkeeper" ? data.goalkeeper_home || "REPLACE_WITH_HOME_GK" : undefined,
-      goalkeeper_away: input.capture_type === "goalkeeper" ? data.goalkeeper_away || "REPLACE_WITH_AWAY_GK" : undefined
+      goalkeeper_away: input.capture_type === "goalkeeper" ? data.goalkeeper_away || "REPLACE_WITH_AWAY_GK" : undefined,
+      official_inactives: input.capture_type === "official_inactives" ? data.official_inactives || [] : undefined,
+      official_inactives_confirmed: input.capture_type === "official_inactives" ? data.official_inactives_confirmed ?? true : undefined,
+      starting_quarterback_home: input.capture_type === "starting_quarterbacks" ? data.starting_quarterback_home || "REPLACE_WITH_HOME_QB" : undefined,
+      starting_quarterback_away: input.capture_type === "starting_quarterbacks" ? data.starting_quarterback_away || "REPLACE_WITH_AWAY_QB" : undefined,
+      starting_quarterbacks_confirmed: input.capture_type === "starting_quarterbacks" ? data.starting_quarterbacks_confirmed ?? true : undefined
     }
   };
 }
@@ -380,7 +409,7 @@ export async function recordSourceCaptureAssistantEvidence(db: Queryable, body: 
         m.match_date,
         COALESCE(pem.home_team_name, home_team.name, 'Home') AS home_team_name,
         COALESCE(pem.away_team_name, away_team.name, 'Away') AS away_team_name
-      FROM matches m
+      FROM v_valid_matches m
       LEFT JOIN provider_event_mappings pem ON pem.hub_match_id = m.id AND pem.is_active = TRUE
       LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
       LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
@@ -454,6 +483,16 @@ export async function recordSourceCaptureAssistantEvidence(db: Queryable, body: 
     screenshot_path: screenshotPath,
     evidence_path: path.join(dir, `${fileBase}.json`),
     evidence_id: evidenceId,
+    upstream_evidence_id: data.upstream_evidence_id || null,
+    upstream_evidence_sha256: data.upstream_evidence_sha256 || null,
+    bookmaker: data.bookmaker || null,
+    scraper_context: data.normalized_event ? {
+      provider: data.provider || null,
+      provider_event_id: data.provider_event_id || data.source_event_id || null,
+      match_fingerprint: data.match_fingerprint || null,
+      competition: data.competition || null,
+      normalized_event: data.normalized_event
+    } : null,
     captured_at: capturedAt,
     created_at: new Date().toISOString(),
     verified_by: verifiedBy,

@@ -75,7 +75,7 @@ async function assertCanonicalMatchTiming(db: Queryable, signal: OwnedSignal) {
         m.match_date,
         m.status,
         l.slug AS league_slug
-      FROM matches m
+      FROM v_valid_matches m
       JOIN leagues l ON l.id = m.league_id
       WHERE m.id = $1
       LIMIT 1

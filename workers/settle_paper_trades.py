@@ -72,7 +72,7 @@ def settle_pending(limit: int, dry_run: bool) -> dict[str, int]:
               COALESCE(finished_match.id, m.id) AS settlement_match_id,
               CASE WHEN finished_match.id IS NOT NULL AND finished_match.id <> m.id THEN TRUE ELSE FALSE END AS logical_fallback
             FROM paper_trades pt
-            JOIN matches m ON m.id = pt.match_id
+            JOIN v_valid_matches m ON m.id = pt.match_id
             JOIN match_competitors trade_home
               ON trade_home.match_id = m.id
              AND trade_home.home_away = 'home'
@@ -81,7 +81,7 @@ def settle_pending(limit: int, dry_run: bool) -> dict[str, int]:
              AND trade_away.home_away = 'away'
             LEFT JOIN LATERAL (
               SELECT fm.id, fm.home_score, fm.away_score
-              FROM matches fm
+              FROM v_valid_matches fm
               JOIN match_competitors final_home
                 ON final_home.match_id = fm.id
                AND final_home.home_away = 'home'

@@ -2,6 +2,7 @@ param(
   [ValidateSet("GenerateTemplate", "Hydrate")]
   [string]$Mode = "GenerateTemplate",
   [string]$OutputPath = "workers\mlb_matchup_features_template.csv",
+  [string]$RepoRoot = "",
   [string]$InputPath,
   [string]$ModelName = "carlos_v1_mlb",
   [switch]$Apply,
@@ -12,7 +13,21 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")
+$repoRoot = if ($RepoRoot) { Resolve-Path -LiteralPath $RepoRoot } else { Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..") }
+
+function Invoke-DockerCommand([string[]]$Arguments) {
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $output = & docker @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+  foreach ($line in @($output)) { Write-Host $line }
+  return $exitCode
+}
+
 Push-Location $repoRoot
 try {
   if ($Mode -eq "GenerateTemplate") {
@@ -31,9 +46,9 @@ try {
       "python", "generate_mlb_matchup_template.py",
       "--output", "/io/$outputName"
     )
-    & docker @dockerArgs
-    if ($LASTEXITCODE -ne 0) {
-      throw "docker compose run fallo con exit code $LASTEXITCODE"
+    $dockerExitCode = Invoke-DockerCommand $dockerArgs
+    if ($dockerExitCode -ne 0) {
+      throw "docker compose run fallo con exit code $dockerExitCode"
     }
     return
   }
@@ -64,9 +79,9 @@ try {
   }
 
   Write-Host "[mlb-features] Hydrating features input=$resolvedInput apply=$Apply hydrate_snapshots=$HydrateSnapshots allow_partial=$AllowPartial"
-  & docker @hydrateArgs
-  if ($LASTEXITCODE -ne 0) {
-    throw "docker compose run fallo con exit code $LASTEXITCODE"
+  $dockerExitCode = Invoke-DockerCommand $hydrateArgs
+  if ($dockerExitCode -ne 0) {
+    throw "docker compose run fallo con exit code $dockerExitCode"
   }
 } finally {
   Pop-Location

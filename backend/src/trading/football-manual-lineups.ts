@@ -151,7 +151,7 @@ export async function getFootballManualLineupStatus(db: Queryable, input: { date
         pt.raw_data->>'lineup_status' AS lineup_status,
         pt.raw_data->'manual_verified_lineup' AS manual_verified_lineup
       FROM paper_trades pt
-      LEFT JOIN matches m ON m.id = pt.match_id
+      LEFT JOIN v_valid_matches m ON m.id = pt.match_id
       WHERE pt.league_type = 'football_shadow'
         AND (
           (m.match_date >= $1::timestamptz AND m.match_date < $2::timestamptz)

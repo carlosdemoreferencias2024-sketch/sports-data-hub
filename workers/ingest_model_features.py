@@ -115,7 +115,7 @@ def ingest_features(sport: str, model_name: str, dry_run: bool, league_slug: str
             )
             SELECT lf.match_id, lf.feature_set
             FROM latest_features lf
-            JOIN matches m ON m.id = lf.match_id
+            JOIN v_valid_matches m ON m.id = lf.match_id
             JOIN leagues l ON l.id = m.league_id
             WHERE m.status::text IN ('scheduled', 'live')
               AND (%s::text IS NULL OR l.slug = %s::text OR lf.feature_set->>'league_slug' = %s::text);

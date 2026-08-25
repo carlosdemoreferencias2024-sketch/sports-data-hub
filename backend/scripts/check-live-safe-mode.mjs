@@ -9,10 +9,10 @@ function withTimeout() {
   return { controller, timeout };
 }
 
-async function request(path) {
+async function request(path, options = {}) {
   const { controller, timeout } = withTimeout();
   try {
-    const response = await fetch(`${baseUrl}${path}`, { signal: controller.signal });
+    const response = await fetch(`${baseUrl}${path}`, { ...options, signal: controller.signal });
     const text = await response.text();
     let json = null;
     try {
@@ -61,6 +61,32 @@ for (const marker of ["REAL_CANDIDATE", "Kelly", "Telegram", "Source Capture Ass
   assert.ok(dashboard.text.includes(marker), `/dashboard/trading should contain ${marker}`);
 }
 results.push({ check: "dashboard_markers", status: dashboard.status, result: "ok" });
+
+const openApi = await request("/docs/json");
+assert.equal(openApi.status, 200, "OpenAPI document must be reachable");
+const writeEndpoints = [];
+for (const [path, operations] of Object.entries(openApi.json?.paths || {})) {
+  for (const method of ["post", "put", "patch", "delete"]) {
+    if (operations[method]) writeEndpoints.push({ method: method.toUpperCase(), path });
+  }
+}
+assert.ok(writeEndpoints.length > 0, "OpenAPI must publish write endpoints");
+
+for (const endpoint of writeEndpoints) {
+  const response = await request(endpoint.path, {
+    method: endpoint.method,
+    headers: { "content-type": "application/json" },
+    body: endpoint.method === "DELETE" ? undefined : "{}"
+  });
+  assert.equal(response.status, 401, `${endpoint.method} ${endpoint.path} must reject writes without an API key`);
+}
+results.push({ check: "write_endpoint_auth", count: writeEndpoints.length, status: 401, result: "protected" });
+
+const forbiddenOrigin = await request("/health", {
+  headers: { origin: "https://untrusted.example" }
+});
+assert.equal(forbiddenOrigin.status, 403, "unlisted browser origins must be rejected");
+results.push({ check: "cors_allowlist", status: forbiddenOrigin.status, result: "protected" });
 
 const sensitiveEndpoints = [
   "/api/v1/internal/analytics/source-capture-assistant/rules",

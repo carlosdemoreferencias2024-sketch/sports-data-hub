@@ -5,7 +5,7 @@ export class SnapshotService {
     const target = await db.query(
       `
         SELECT m.id, m.match_date, mc.team_id, mc.home_away
-        FROM matches m
+        FROM v_valid_matches m
         JOIN match_competitors mc ON mc.match_id = m.id
         WHERE m.id = $1;
       `,
@@ -27,7 +27,7 @@ export class SnapshotService {
             COALESCE(SUM(mc.score), 0)::int AS points_for,
             COALESCE(SUM(opp.score), 0)::int AS points_against
           FROM match_competitors mc
-          JOIN matches prior ON prior.id = mc.match_id
+          JOIN v_valid_matches prior ON prior.id = mc.match_id
           JOIN match_competitors opp ON opp.match_id = prior.id AND opp.team_id <> mc.team_id
           WHERE mc.team_id = $1
             AND prior.status = 'finished'
@@ -50,7 +50,7 @@ export class SnapshotService {
               END AS result,
               prior.match_date
             FROM match_competitors mc
-            JOIN matches prior ON prior.id = mc.match_id
+            JOIN v_valid_matches prior ON prior.id = mc.match_id
             JOIN match_competitors opp ON opp.match_id = prior.id AND opp.team_id <> mc.team_id
             WHERE mc.team_id = $1
               AND prior.status = 'finished'
@@ -123,7 +123,7 @@ export class SnapshotService {
     const matches = await db.query(
       `
         SELECT id
-        FROM matches
+        FROM v_valid_matches
         ORDER BY match_date ASC
         LIMIT $1;
       `,

@@ -40,11 +40,79 @@ def today_date_key() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d")
 
 
-def match_date_for(backfill_date: str | None) -> str:
-    if not backfill_date:
-        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+def normalize_exact_timestamp(value: str) -> str | None:
+    try:
+        if value.isdigit():
+            epoch = int(value)
+            if epoch > 10_000_000_000:
+                epoch /= 1000
+            parsed = datetime.fromtimestamp(epoch, tz=timezone.utc)
+        else:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                return None
+            parsed = parsed.astimezone(timezone.utc)
+        return parsed.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    except (ValueError, OverflowError):
+        return None
 
-    return f"{backfill_date[:4]}-{backfill_date[4:6]}-{backfill_date[6:8]}T12:00:00Z"
+
+def embedded_event_dates(soup) -> dict[str, str]:
+    marker = "window['__espnfitt__']="
+    script_text = next(
+        (
+            script.string or script.get_text()
+            for script in soup.find_all("script")
+            if marker in (script.string or script.get_text() or "")
+        ),
+        "",
+    )
+    if not script_text:
+        return {}
+    try:
+        start = script_text.index(marker) + len(marker)
+        payload, _ = json.JSONDecoder().raw_decode(script_text[start:])
+    except (ValueError, json.JSONDecodeError):
+        return {}
+
+    scoreboard = payload.get("page", {}).get("content", {}).get("scoreboard", {})
+    events = list(scoreboard.get("evts") or [])
+    for group in scoreboard.get("gmsByLeague") or []:
+        events.extend(group.get("evts") or [])
+
+    dates: dict[str, str] = {}
+    for event in events:
+        event_id = str(event.get("id") or "").strip()
+        event_date = normalize_exact_timestamp(str(event.get("date") or "").strip())
+        if event_id and event_date:
+            dates[event_id] = event_date
+    return dates
+
+
+def exact_match_date(node, event_dates: dict[str, str] | None = None) -> str | None:
+    event_id = str(node.get("id") or "").strip()
+    if not event_id:
+        scoreboard = node.find_parent("section", class_="Scoreboard")
+        event_id = str(scoreboard.get("id") or "").strip() if scoreboard else ""
+    if event_dates and event_id in event_dates:
+        return event_dates[event_id]
+
+    candidates: list[str] = []
+    for selector in ["time[datetime]", "[data-date]", "[data-start-date]", "[data-start-time]"]:
+        for item in node.select(selector):
+            for attribute in ["datetime", "data-date", "data-start-date", "data-start-time"]:
+                value = item.get(attribute)
+                if value:
+                    candidates.append(str(value).strip())
+    for attribute in ["data-date", "data-start-date", "data-start-time"]:
+        value = node.get(attribute)
+        if value:
+            candidates.append(str(value).strip())
+    for value in candidates:
+        parsed = normalize_exact_timestamp(value)
+        if parsed:
+            return parsed
+    return None
 
 
 def url_for_backfill(url: str, backfill_date: str | None) -> str:
@@ -156,7 +224,10 @@ def line_score(node) -> int | None:
     return parse_int_score(values[0]) if values else None
 
 
-def parse_scoreboard(node, match_date: str) -> ScrapedMatch | None:
+def parse_scoreboard(node, event_dates: dict[str, str] | None = None) -> ScrapedMatch | None:
+    match_date = exact_match_date(node, event_dates)
+    if not match_date:
+        return None
     side_nodes = {
         "home": node.select_one(".ScoreboardScoreCell__Item--home"),
         "away": node.select_one(".ScoreboardScoreCell__Item--away"),
@@ -229,16 +300,16 @@ def fetch_espn_mlb(url: str, backfill_date: str | None = None) -> list[ScrapedMa
         return []
 
     soup = BeautifulSoup(response.content, "html.parser")
+    event_dates = embedded_event_dates(soup)
     scoreboards = soup.select("section.Scoreboard")
     if not scoreboards:
         print(json.dumps({"level": "warn", "event": "mlb_scoreboards_not_detected"}), flush=True)
         return []
 
-    match_date = match_date_for(backfill_date)
     matches: list[ScrapedMatch] = []
     for node in scoreboards:
         try:
-            match = parse_scoreboard(node, match_date)
+            match = parse_scoreboard(node, event_dates)
             if match:
                 matches.append(match)
         except Exception as exc:
@@ -309,8 +380,6 @@ def main() -> None:
     parser.add_argument("--shadow-mode", action="store_true", default=env_flag("MLB_SHADOW_MODE", False))
     args = parser.parse_args()
     backfill_date = normalize_backfill_date(args.backfill_date)
-    if args.source_mode == "espn" and not backfill_date and not args.backfill_days:
-        backfill_date = today_date_key()
     if args.backfill_days and backfill_date:
         raise ValueError("Use either --backfill-date or --backfill-days, not both")
 

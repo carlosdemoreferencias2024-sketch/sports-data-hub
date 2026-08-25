@@ -60,7 +60,7 @@ def fetch_prediction_results(
             home_comp.team_id AS home_team_id,
             away_comp.team_id AS away_team_id
           FROM model_quotes mq
-          JOIN matches m ON m.id = mq.match_id
+          JOIN v_valid_matches m ON m.id = mq.match_id
           JOIN match_competitors home_comp
             ON home_comp.match_id = m.id
            AND home_comp.home_away = 'home'
@@ -85,7 +85,7 @@ def fetch_prediction_results(
         FROM latest_model_quotes lmq
         JOIN LATERAL (
           SELECT fm.id, fm.home_score, fm.away_score
-          FROM matches fm
+          FROM v_valid_matches fm
           JOIN match_competitors final_home
             ON final_home.match_id = fm.id
            AND final_home.home_away = 'home'
@@ -98,7 +98,7 @@ def fetch_prediction_results(
             AND fm.status = 'finished'
             AND fm.home_score IS NOT NULL
             AND fm.away_score IS NOT NULL
-            AND ABS(EXTRACT(EPOCH FROM (fm.match_date - (SELECT match_date FROM matches WHERE id = lmq.match_id)))) <= 60 * 60 * 24 * 14
+            AND ABS(EXTRACT(EPOCH FROM (fm.match_date - (SELECT match_date FROM v_valid_matches WHERE id = lmq.match_id)))) <= 60 * 60 * 24 * 14
           ORDER BY
             CASE WHEN fm.id = lmq.match_id THEN 0 ELSE 1 END,
             fm.match_date DESC,

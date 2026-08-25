@@ -23,7 +23,7 @@ def generate_template(output_path: str) -> int:
               pem.provider_name,
               pem.provider_event_id
             FROM provider_event_mappings pem
-            JOIN matches m ON m.id = pem.hub_match_id
+            JOIN v_valid_matches m ON m.id = pem.hub_match_id
             WHERE pem.is_active = TRUE
               AND m.status IN ('scheduled', 'live')
             ORDER BY pem.kickoff ASC;

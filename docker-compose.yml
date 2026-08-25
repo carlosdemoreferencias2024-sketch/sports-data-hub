@@ -11,9 +11,10 @@ services:
       PORT: 3000
       HOST: 0.0.0.0
       DATABASE_URL: postgres://${POSTGRES_USER:-sports_admin}:${POSTGRES_PASSWORD:-sports_dev_password}@db-postgres:5432/${POSTGRES_DB:-sports_db}
-      REDIS_URL: redis://cache-redis:6379
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev_internal_api_key}
-      API_KEY: ${API_KEY:-dev_internal_api_key}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@cache-redis:6379
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+      API_KEY: ${API_KEY:?API_KEY is required}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://127.0.0.1:4000,http://localhost:4000}
       RATE_LIMIT_MAX: 60
       RATE_LIMIT_WINDOW: 1 minute
       API_FOOTBALL_KEY: ${API_FOOTBALL_KEY:-}
@@ -22,7 +23,7 @@ services:
       API_FOOTBALL_RATE_LIMIT_PER_MINUTE: ${API_FOOTBALL_RATE_LIMIT_PER_MINUTE:-10}
       API_FOOTBALL_CACHE_HOURS: ${API_FOOTBALL_CACHE_HOURS:-6}
     ports:
-      - "${ENGINE_BIND_ADDRESS:-0.0.0.0}:${ENGINE_HOST_PORT:-4000}:3000"
+      - "${ENGINE_BIND_ADDRESS:-127.0.0.1}:${ENGINE_HOST_PORT:-4000}:3000"
     volumes:
       - ./backend/uploads:/app/uploads
     depends_on:
@@ -47,7 +48,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sports_dev_password}
       POSTGRES_DB: ${POSTGRES_DB:-sports_db}
     ports:
-      - "${POSTGRES_BIND_ADDRESS:-0.0.0.0}:${POSTGRES_HOST_PORT:-5433}:5432"
+      - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - data_hub_postgres_data:/var/lib/postgresql/data
       - ./database/schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
@@ -65,8 +66,11 @@ services:
     image: redis:7-alpine
     container_name: data_hub_redis
     restart: unless-stopped
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"]
     ports:
-      - "${REDIS_BIND_ADDRESS:-0.0.0.0}:${REDIS_HOST_PORT:-6380}:6379"
+      - "${REDIS_BIND_ADDRESS:-127.0.0.1}:${REDIS_HOST_PORT:-6380}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -86,7 +90,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-sports_admin}:${POSTGRES_PASSWORD:-sports_dev_password}@db-postgres:5432/${POSTGRES_DB:-sports_db}
       API_URL: http://engine-node:3000/api/v1/internal/matches/batch
       BATCH_INGESTION_URL: http://engine-node:3000/api/v1/internal/matches/batch
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev_internal_api_key}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
       SOCCER_FIXTURE_PATH: fixtures/soccer_scoreboard.html
       SOCCER_SOURCE_MODE: espn
       SOCCER_SOURCE_SLUG: espn-mexico
@@ -105,6 +109,25 @@ services:
     networks:
       - data_hub_network
 
+  fixture-repair:
+    build:
+      context: ./workers
+      dockerfile: Dockerfile.fixture-repair
+    profiles:
+      - maintenance
+    working_dir: /app
+    volumes:
+      - ./workers:/app:ro
+      - ./backups:/backups
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-sports_admin}:${POSTGRES_PASSWORD:-sports_dev_password}@db-postgres:5432/${POSTGRES_DB:-sports_db}
+      BACKUP_DIR: /backups
+    depends_on:
+      db-postgres:
+        condition: service_healthy
+    networks:
+      - data_hub_network
+
   scraper-mlb:
     image: python:3.12-slim
     container_name: data_hub_scraper_mlb
@@ -115,7 +138,7 @@ services:
     environment:
       API_URL: http://engine-node:3000/api/v1/internal/matches/batch
       BATCH_INGESTION_URL: http://engine-node:3000/api/v1/internal/matches/batch
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev_internal_api_key}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
       MLB_FIXTURE_PATH: fixtures/sample_scoreboard.html
       MLB_SOURCE_MODE: espn
       MLB_SOURCE_SLUG: espn-mlb
@@ -144,7 +167,7 @@ services:
     environment:
       HUB_BASE_URL: http://engine-node:3000
       DATABASE_URL: postgres://${POSTGRES_USER:-sports_admin}:${POSTGRES_PASSWORD:-sports_dev_password}@db-postgres:5432/${POSTGRES_DB:-sports_db}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev_internal_api_key}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       ALPHA_NOTIFY_MIN_EV: ${ALPHA_NOTIFY_MIN_EV:-0.05}
@@ -232,7 +255,7 @@ services:
       - ./workers/research_payloads:/research-payloads:ro
     environment:
       HUB_BASE_URL: http://engine-node:3000
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev_internal_api_key}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
       SPORTS_RESEARCH_INTERVAL_SECONDS: ${SPORTS_RESEARCH_INTERVAL_SECONDS:-1800}
       SPORTS_RESEARCH_HEALTH_PORT: 8080
       SPORTS_RESEARCH_DRY_RUN: ${SPORTS_RESEARCH_DRY_RUN:-true}
@@ -266,7 +289,7 @@ services:
     command: python sports_context_incremental_worker.py
     environment:
       HUB_BASE_URL: http://engine-node:3000
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev_internal_api_key}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
       SPORTS_CONTEXT_INCREMENTAL_INTERVAL_SECONDS: ${SPORTS_CONTEXT_INCREMENTAL_INTERVAL_SECONDS:-900}
       SPORTS_CONTEXT_INCREMENTAL_HEALTH_PORT: 8081
       SPORTS_CONTEXT_INCREMENTAL_DRY_RUN: ${SPORTS_CONTEXT_INCREMENTAL_DRY_RUN:-true}
@@ -307,7 +330,7 @@ services:
     environment:
       API_BASE_URL: http://engine-node:3000
       API_URL: http://engine-node:3000/api/v1
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:-dev_internal_api_key}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
       ANALYTICS_LEAGUES: liga-mx,mlb
       MIN_EV_THRESHOLD: "0.02"
       MIN_PLAYED_FOR_SIGNAL: "2"
@@ -330,7 +353,7 @@ services:
       MB_DB_FILE: /metabase-data/metabase.db
       JAVA_TIMEZONE: ${METABASE_TIMEZONE:-America/Matamoros}
     ports:
-      - "${METABASE_BIND_ADDRESS:-0.0.0.0}:${METABASE_PORT:-3001}:3000"
+      - "${METABASE_BIND_ADDRESS:-127.0.0.1}:${METABASE_PORT:-3001}:3000"
     volumes:
       - data_hub_metabase_data:/metabase-data
     depends_on:

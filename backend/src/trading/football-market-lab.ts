@@ -565,7 +565,7 @@ export async function processFootballShadowFeed(db: Queryable, body: { dry_run?:
               || CASE WHEN LOWER($2) LIKE '%manual%' OR LOWER($2) LIKE '%shadow%' THEN ARRAY['MANUAL_OR_SHADOW']::text[] ELSE ARRAY[]::text[] END,
             $7::jsonb
           FROM quote_insert qi
-          JOIN matches m ON m.id = $1
+          JOIN v_valid_matches m ON m.id = $1
           JOIN leagues l ON l.id = m.league_id
           JOIN sports s ON s.id = l.sport_id
           ON CONFLICT (market_quote_id, selection) WHERE market_quote_id IS NOT NULL DO NOTHING

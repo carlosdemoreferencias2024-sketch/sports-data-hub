@@ -45,11 +45,112 @@ def backfill_date_range(days: int) -> list[str]:
     return [(today - timedelta(days=offset)).strftime("%Y%m%d") for offset in range(1, days + 1)]
 
 
-def match_date_for(backfill_date: str | None) -> str:
-    if not backfill_date:
-        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+def normalize_exact_timestamp(value: str) -> str | None:
+    try:
+        if value.isdigit():
+            epoch = int(value)
+            if epoch > 10_000_000_000:
+                epoch /= 1000
+            parsed = datetime.fromtimestamp(epoch, tz=timezone.utc)
+        else:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                return None
+            parsed = parsed.astimezone(timezone.utc)
+        return parsed.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    except (ValueError, OverflowError):
+        return None
 
-    return f"{backfill_date[:4]}-{backfill_date[4:6]}-{backfill_date[6:8]}T12:00:00Z"
+
+def embedded_event_dates(soup) -> dict[str, str]:
+    marker = "window['__espnfitt__']="
+    script_text = next(
+        (
+            script.string or script.get_text()
+            for script in soup.find_all("script")
+            if marker in (script.string or script.get_text() or "")
+        ),
+        "",
+    )
+    if not script_text:
+        return {}
+    try:
+        start = script_text.index(marker) + len(marker)
+        payload, _ = json.JSONDecoder().raw_decode(script_text[start:])
+    except (ValueError, json.JSONDecodeError):
+        return {}
+
+    scoreboard = payload.get("page", {}).get("content", {}).get("scoreboard", {})
+    events = list(scoreboard.get("evts") or [])
+    for group in scoreboard.get("gmsByLeague") or []:
+        events.extend(group.get("evts") or [])
+
+    dates: dict[str, str] = {}
+    for event in events:
+        event_id = str(event.get("id") or "").strip()
+        event_date = normalize_exact_timestamp(str(event.get("date") or "").strip())
+        if event_id and event_date:
+            dates[event_id] = event_date
+    return dates
+
+
+def exact_match_date(node, event_dates: dict[str, str] | None = None) -> str | None:
+    scoreboard = node.find_parent("section", class_="Scoreboard")
+    event_ids = [
+        provider_event_id(node),
+        node.get("data-event-id"),
+        node.get("data-game-id"),
+        node.get("id"),
+        scoreboard.get("id") if scoreboard else None,
+    ]
+    if event_dates:
+        for event_id in event_ids:
+            key = str(event_id or "").strip()
+            if key in event_dates:
+                return event_dates[key]
+
+    candidates: list[str] = []
+    for selector in ["time[datetime]", "[data-date]", "[data-start-date]", "[data-start-time]"]:
+        for item in node.select(selector):
+            for attribute in ["datetime", "data-date", "data-start-date", "data-start-time"]:
+                value = item.get(attribute)
+                if value:
+                    candidates.append(str(value).strip())
+    for attribute in ["data-date", "data-start-date", "data-start-time"]:
+        value = node.get(attribute)
+        if value:
+            candidates.append(str(value).strip())
+    for value in candidates:
+        parsed = normalize_exact_timestamp(value)
+        if parsed:
+            return parsed
+    return None
+
+
+def provider_event_id(node) -> str | None:
+    candidates = [
+        node.get("data-event-id"),
+        node.get("data-game-id"),
+        node.get("id"),
+    ]
+    scoreboard = node.find_parent("section", class_="Scoreboard")
+    if scoreboard:
+        candidates.extend((
+            scoreboard.get("data-event-id"),
+            scoreboard.get("data-game-id"),
+            scoreboard.get("id"),
+        ))
+
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if re.fullmatch(r"\d{6,}", value):
+            return value
+
+    for link in node.select("a[href]"):
+        match = re.search(r"(?:gameId/|gameId=|event/|event=)(\d{6,})", str(link.get("href") or ""))
+        if match:
+            return match.group(1)
+    return None
 
 
 def url_for_backfill(url: str, backfill_date: str | None) -> str:
@@ -116,11 +217,19 @@ def normalize_status(period: str | None) -> str:
     return "scheduled"
 
 
-def make_source_match_id(league_slug: str, home_alias: str, away_alias: str, match_date: str, status: str = "scheduled") -> str:
+def make_source_match_id(
+    league_slug: str,
+    home_alias: str,
+    away_alias: str,
+    match_date: str,
+    status: str = "scheduled",
+    provider_event_id: str | None = None,
+) -> str:
+    if provider_event_id:
+        return f"espn-{league_slug}-{provider_event_id}"
+
     home_slug = normalize_alias(home_alias).replace(" ", "-")
     away_slug = normalize_alias(away_alias).replace(" ", "-")
-    if status in {"scheduled", "live"}:
-        return f"espn-{league_slug}-event-{home_slug}-{away_slug}"
     return f"espn-{league_slug}-{match_date[:10]}-{home_slug}-{away_slug}"
 
 
@@ -184,7 +293,11 @@ def candidate_game_nodes(block):
     return nodes
 
 
-def parse_game_node(node, match_date: str, league_slug: str) -> ScrapedMatch | None:
+def parse_game_node(node, league_slug: str, event_dates: dict[str, str] | None = None) -> ScrapedMatch | None:
+    match_date = exact_match_date(node, event_dates)
+    if not match_date:
+        return None
+    event_id = provider_event_id(node)
     team_selectors = [
         ".ScoreCell__TeamName",
         ".ScoreCell__Name",
@@ -233,7 +346,7 @@ def parse_game_node(node, match_date: str, league_slug: str) -> ScrapedMatch | N
             home_odds, away_odds = parse_odds(node)
 
             return ScrapedMatch(
-                source_match_id=make_source_match_id(league_slug, home_alias, away_alias, match_date, status),
+                source_match_id=make_source_match_id(league_slug, home_alias, away_alias, match_date, status, event_id),
                 league_slug=league_slug,
                 match_date=match_date,
                 status=status,
@@ -277,7 +390,7 @@ def parse_game_node(node, match_date: str, league_slug: str) -> ScrapedMatch | N
     status = normalize_status(period)
 
     return ScrapedMatch(
-        source_match_id=make_source_match_id(league_slug, home_alias, away_alias, match_date, status),
+        source_match_id=make_source_match_id(league_slug, home_alias, away_alias, match_date, status, event_id),
         league_slug=league_slug,
         match_date=match_date,
         status=status,
@@ -343,6 +456,7 @@ def fetch_espn_league(config: LeagueConfig, backfill_date: str | None = None) ->
         return []
 
     soup = BeautifulSoup(response.content, "html.parser")
+    event_dates = embedded_event_dates(soup)
     blocks = find_league_blocks(soup, config.heading)
     if not blocks:
         print(
@@ -358,13 +472,12 @@ def fetch_espn_league(config: LeagueConfig, backfill_date: str | None = None) ->
         )
         blocks = soup.select("section.Scoreboard")
 
-    match_date = match_date_for(backfill_date)
     matches: list[ScrapedMatch] = []
 
     for block in blocks:
         for node in candidate_game_nodes(block):
             try:
-                match = parse_game_node(node, match_date, config.league_slug)
+                match = parse_game_node(node, config.league_slug, event_dates)
                 if match:
                     matches.append(match)
             except Exception as exc:
@@ -373,7 +486,7 @@ def fetch_espn_league(config: LeagueConfig, backfill_date: str | None = None) ->
     if not matches:
         for node in soup.select("section.Scoreboard"):
             try:
-                match = parse_game_node(node, match_date, config.league_slug)
+                match = parse_game_node(node, config.league_slug, event_dates)
                 if match:
                     matches.append(match)
             except Exception as exc:

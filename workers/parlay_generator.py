@@ -48,7 +48,7 @@ def fetch_opportunities(model_name: str | None, min_ev: float, processed: bool, 
             mq.confidence,
             ao.detected_at
           FROM alpha_opportunities ao
-          JOIN matches m ON m.id = ao.match_id
+          JOIN v_valid_matches m ON m.id = ao.match_id
           JOIN model_quotes mq ON mq.id = ao.model_quote_id
           LEFT JOIN provider_event_mappings pem ON pem.hub_match_id = ao.match_id AND pem.is_active = TRUE
           LEFT JOIN LATERAL (

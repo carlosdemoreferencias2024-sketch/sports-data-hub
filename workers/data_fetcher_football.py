@@ -18,7 +18,7 @@ def _league_averages(conn, league_slug: str) -> dict[str, float]:
           AVG(home_score)::float AS avg_home_goals,
           AVG(away_score)::float AS avg_away_goals,
           AVG(CASE WHEN home_score = away_score THEN 1.0 ELSE 0.0 END)::float AS draw_rate
-        FROM matches m
+        FROM v_valid_matches m
         JOIN leagues l ON l.id = m.league_id
         WHERE l.slug = %s
           AND m.status = 'finished'
@@ -44,7 +44,7 @@ def _team_profile(conn, team_id: str, league_slug: str, lookback_games: int, lea
             ELSE m.home_score::float
           END AS goals_against
         FROM match_competitors mc
-        JOIN matches m ON m.id = mc.match_id
+        JOIN v_valid_matches m ON m.id = mc.match_id
         JOIN leagues l ON l.id = m.league_id
         WHERE l.slug = %s
           AND mc.team_id = %s
@@ -96,7 +96,7 @@ def fetch_football_features(model_name: str, league_slug: str, lookback_games: i
                   m.match_date DESC,
                   m.updated_at DESC
               ) AS logical_rank
-            FROM matches m
+            FROM v_valid_matches m
             JOIN leagues l ON l.id = m.league_id
             JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
             JOIN match_competitors away_mc ON away_mc.match_id = m.id AND away_mc.home_away = 'away'

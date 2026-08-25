@@ -11,7 +11,7 @@ const { recordSourceCaptureAssistantEvidence, getSourceCaptureAssistantRules } =
 
 const db = {
   async query(sql, values = []) {
-    if (String(sql).includes("FROM matches")) {
+    if (String(sql).includes("FROM v_valid_matches")) {
       return {
         rows: [{
           id: values[0],
@@ -102,6 +102,39 @@ try {
   assert.equal(onTimeClosing.real_candidate, 0);
   assert.ok(onTimeClosing.evidence_id);
   assert.ok(onTimeClosing.evidence_path);
+
+  const scraperContext = await recordSourceCaptureAssistantEvidence(db, {
+    match_id: "99857e9b-d4ce-5af1-9f22-afcec3fc6676",
+    sport: "basketball",
+    capture_type: "match_status",
+    source_name: "foxsports_manual_verified",
+    source_url: "https://www.foxsports.com/scores",
+    verified_by: "human-reviewer",
+    captured_at: "2026-07-29T22:24:00.000Z",
+    visible_text: "FOX Sports status reviewed by a human",
+    data: {
+      bookmaker: null,
+      upstream_evidence_id: "abc123",
+      upstream_evidence_sha256: "abc123def456",
+      provider_raw_sha256: "raw123",
+      provider: "foxsports",
+      provider_event_id: "fox-42",
+      match_fingerprint: "fingerprint-42",
+      normalized_event: {
+        detail_level: "full_detail",
+        team_statistics: { home: [{ key: "shots", value: 12 }] },
+        odds: [{ bookmaker: "Displayed market context only" }]
+      }
+    }
+  });
+  assert.equal(scraperContext.applied, true);
+  assert.equal(scraperContext.upstream_evidence_id, "abc123");
+  assert.equal(scraperContext.upstream_evidence_sha256, "abc123def456");
+  assert.equal(scraperContext.payload_draft.data.upstream_evidence_id, "abc123");
+  assert.equal(scraperContext.scraper_context.provider_event_id, "fox-42");
+  assert.equal(scraperContext.payload_draft.data.scraper_context.normalized_event.detail_level, "full_detail");
+  assert.equal(scraperContext.auto_posted, false);
+  assert.equal(scraperContext.picks_created, 0);
 } finally {
   process.chdir(backendRoot);
   await rm(tempCwd, { recursive: true, force: true });

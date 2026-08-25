@@ -78,6 +78,7 @@ function normalizeSport(input?: string) {
   const sport = String(input || "all").toLowerCase();
   if (["football", "soccer", "futbol", "fútbol"].includes(sport)) return "soccer";
   if (["baseball", "mlb"].includes(sport)) return "baseball";
+  if (["nfl", "american-football", "american_football", "american football"].includes(sport)) return "american_football";
   return "all";
 }
 
@@ -108,6 +109,9 @@ function sourceNeededFor(row: Record<string, any>, alertType: string) {
   }
   if (sport === "soccer" && missing.some((item) => item.includes("goalkeeper") || item.includes("lineup"))) {
     return "official_lineup / 365scores_manual_verified / flashscore_manual_verified";
+  }
+  if (sport === "american_football" && missing.some((item) => item.includes("inactive") || item.includes("quarterback") || item.includes("injur"))) {
+    return "official_nfl_inactives / official_team_status / espn_provider_context";
   }
   if (missing.some((item) => item.includes("result"))) return "official_result_manual_verified";
   return row.blocked_by_external_source ? "manual_verified_source" : "dashboard_review";

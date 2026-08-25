@@ -48,6 +48,7 @@ export async function getShadowTicketChain(db: Queryable, input: ChainQuery = {}
         CASE
           WHEN l.slug IN ('mlb', 'baseball/mlb') THEN 'baseball'
           WHEN l.slug = 'nba' THEN 'basketball'
+          WHEN l.slug = 'nfl' OR s.slug = 'american-football' THEN 'american_football'
           WHEN l.slug LIKE '%world-cup%' OR s.slug = 'soccer' THEN 'soccer'
           ELSE s.slug
         END AS sport,
@@ -95,7 +96,7 @@ export async function getShadowTicketChain(db: Queryable, input: ChainQuery = {}
         closing_os.raw_data->>'evidence_id' AS closing_evidence_id,
         closing_os.raw_data->>'screenshot_sha256' AS closing_screenshot_sha256
       FROM paper_trades pt
-      JOIN matches m ON m.id = pt.match_id
+      JOIN v_valid_matches m ON m.id = pt.match_id
       JOIN leagues l ON l.id = m.league_id
       JOIN sports s ON s.id = l.sport_id
       LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
@@ -132,6 +133,7 @@ export async function getShadowTicketChain(db: Queryable, input: ChainQuery = {}
         AND ($3 = 'all' OR CASE
           WHEN l.slug IN ('mlb', 'baseball/mlb') THEN 'baseball'
           WHEN l.slug = 'nba' THEN 'basketball'
+          WHEN l.slug = 'nfl' OR s.slug = 'american-football' THEN 'american_football'
           WHEN l.slug LIKE '%world-cup%' OR s.slug = 'soccer' THEN 'soccer'
           ELSE s.slug
         END = $3)

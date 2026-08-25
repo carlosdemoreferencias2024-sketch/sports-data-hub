@@ -130,7 +130,7 @@ async function loadRows(db: Queryable, input: MlbParkWeatherInput) {
         home_team.name AS home_team,
         away_team.name AS away_team
       FROM real_paper_snapshots rps
-      LEFT JOIN matches m ON m.id = rps.match_id
+      LEFT JOIN v_valid_matches m ON m.id = rps.match_id
       LEFT JOIN venues v ON v.id = m.venue_id
       LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
       LEFT JOIN teams home_team ON home_team.id = home_mc.team_id

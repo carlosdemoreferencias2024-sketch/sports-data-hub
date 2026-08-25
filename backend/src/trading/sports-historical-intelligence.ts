@@ -17,12 +17,13 @@ const guardrails = {
 
 function normalizeName(value: unknown) {
   return String(value ?? "")
-    .trim()
-    .toLowerCase()
-    .normalize("NFD")
+    .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/football club|club de futbol|club|fc|sc|cf/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 function textValue(value: unknown) {
@@ -482,6 +483,84 @@ export async function ingestHistoricalMatches(db: Queryable, body: unknown) {
           record.source,
           record.source_confidence_score,
           record.source_observed_at ?? null,
+          JSON.stringify(record.raw_data ?? record)
+        ]
+      );
+      if (result.rows[0]?.inserted) inserted += 1;
+      else updated += 1;
+    }
+  }
+
+  for (const record of parsed.team_match_stats) {
+    const matchId = textValue(record.match_id);
+    const teamName = textValue(record.team_name ?? record.canonical_team_name);
+    const opponentTeam = textValue(record.opponent_team ?? record.opponent_team_name);
+    if (!matchId || !teamName) {
+      skipped += 1;
+      rows.push(rowAction("team_match_stats", record, "SKIPPED", "Missing match_id or team_name."));
+      continue;
+    }
+    rows.push(rowAction("team_match_stats", record, parsed.dry_run ? "WOULD_UPSERT" : "UPSERTED", "Historical team result and model feature row."));
+    if (!parsed.dry_run) {
+      const result = await db.query(
+        `
+          INSERT INTO sports_team_match_stats (
+            match_id, sport, league_id, team_id, team_name, normalized_team_name,
+            opponent_team_id, opponent_team, is_home, is_neutral, season, result,
+            points_for, points_against, rest_days, won, drew, lost,
+            source, source_confidence_score, raw_data, updated_at
+          )
+          VALUES (
+            $1, $2, COALESCE($3, ''), $4, $5, $6,
+            $7, $8, $9, COALESCE($10, false), $11, $12,
+            $13, $14, $15, $16, $17, $18,
+            $19, $20, $21::jsonb, now()
+          )
+          ON CONFLICT (match_id, normalized_team_name)
+          DO UPDATE SET
+            sport = EXCLUDED.sport,
+            league_id = EXCLUDED.league_id,
+            team_id = COALESCE(EXCLUDED.team_id, sports_team_match_stats.team_id),
+            team_name = EXCLUDED.team_name,
+            opponent_team_id = COALESCE(EXCLUDED.opponent_team_id, sports_team_match_stats.opponent_team_id),
+            opponent_team = COALESCE(EXCLUDED.opponent_team, sports_team_match_stats.opponent_team),
+            is_home = EXCLUDED.is_home,
+            is_neutral = EXCLUDED.is_neutral,
+            season = COALESCE(EXCLUDED.season, sports_team_match_stats.season),
+            result = COALESCE(EXCLUDED.result, sports_team_match_stats.result),
+            points_for = COALESCE(EXCLUDED.points_for, sports_team_match_stats.points_for),
+            points_against = COALESCE(EXCLUDED.points_against, sports_team_match_stats.points_against),
+            rest_days = COALESCE(EXCLUDED.rest_days, sports_team_match_stats.rest_days),
+            won = COALESCE(EXCLUDED.won, sports_team_match_stats.won),
+            drew = COALESCE(EXCLUDED.drew, sports_team_match_stats.drew),
+            lost = COALESCE(EXCLUDED.lost, sports_team_match_stats.lost),
+            source = EXCLUDED.source,
+            source_confidence_score = GREATEST(sports_team_match_stats.source_confidence_score, EXCLUDED.source_confidence_score),
+            raw_data = sports_team_match_stats.raw_data || EXCLUDED.raw_data,
+            updated_at = now()
+          RETURNING (xmax = 0) AS inserted
+        `,
+        [
+          matchId,
+          record.sport ?? "football",
+          record.league_id ?? null,
+          record.team_id ?? null,
+          teamName,
+          normalizeName(teamName),
+          record.opponent_team_id ?? null,
+          opponentTeam || null,
+          record.is_home ?? null,
+          record.is_neutral ?? false,
+          record.season ?? null,
+          record.result ?? null,
+          numberOrNull(record.points_for),
+          numberOrNull(record.points_against),
+          numberOrNull(record.rest_days),
+          record.won ?? null,
+          record.drew ?? null,
+          record.lost ?? null,
+          record.source ?? record.provider ?? "manual_verified_json",
+          numberOrNull(record.source_confidence_score) ?? 0,
           JSON.stringify(record.raw_data ?? record)
         ]
       );

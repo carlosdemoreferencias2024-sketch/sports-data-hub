@@ -307,7 +307,7 @@ def detect_alpha(
               SELECT DISTINCT ON (mq.match_id, mq.model_name, mq.market_type, COALESCE(mq.line, -9999))
                 mq.*
               FROM model_quotes mq
-              JOIN matches m ON m.id = mq.match_id
+              JOIN v_valid_matches m ON m.id = mq.match_id
               WHERE m.status::text IN ('scheduled', 'live')
                 AND mq.generated_at >= NOW() - (%s * INTERVAL '1 minute')
                 {model_filter}
@@ -453,7 +453,7 @@ def detect_alpha(
               ON mk.match_id = mq.match_id
              AND mk.market_type = mq.market_type
              AND COALESCE(mk.line, -9999) = COALESCE(mq.line, -9999)
-            JOIN matches m ON m.id = mq.match_id
+            JOIN v_valid_matches m ON m.id = mq.match_id
             JOIN leagues l ON l.id = m.league_id
             JOIN sports s ON s.id = l.sport_id
             LEFT JOIN provider_event_mappings pem ON pem.hub_match_id = mq.match_id AND pem.is_active = TRUE

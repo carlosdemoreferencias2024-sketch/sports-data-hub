@@ -602,7 +602,7 @@ export async function getFootballTodayUniverse(db: Queryable, date?: string) {
     `
       WITH observed_matches AS (
         SELECT m.id, l.slug AS league_id
-        FROM matches m
+        FROM v_valid_matches m
         JOIN leagues l ON l.id = m.league_id
         WHERE m.raw_data->>'football_today_universe' = 'true'
           AND m.match_date >= $1::timestamptz
@@ -630,7 +630,7 @@ export async function getFootballTodayUniverse(db: Queryable, date?: string) {
         COUNT(DISTINCT m.id)::int AS observed_fixtures,
         COUNT(os.id) FILTER (WHERE os.raw_data->>'feed_status' = 'MARKET_SNAPSHOT')::int AS market_snapshots,
         COUNT(os.id) FILTER (WHERE os.raw_data->>'feed_status' = 'SHADOW_CANDIDATE')::int AS shadow_candidates
-      FROM matches m
+      FROM v_valid_matches m
       JOIN leagues l ON l.id = m.league_id
       LEFT JOIN odds_snapshots os ON os.match_id = m.id AND os.raw_data->>'football_today_universe' = 'true'
       WHERE m.raw_data->>'football_today_universe' = 'true'

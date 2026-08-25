@@ -4,7 +4,7 @@ param(
   [string]$HubBaseUrl = "http://127.0.0.1:4000",
   [string]$InternalApiKey = $(if ($env:INTERNAL_API_KEY) { $env:INTERNAL_API_KEY } else { $env:SPORTS_DATA_HUB_INTERNAL_KEY }),
   [string]$Date = "",
-  [string]$ModelName = "sports_data_hub_football_fair_odds_v1",
+  [string]$ModelName = "sports_data_hub_football_fair_odds_v3",
   [double]$MinEv = 0.03,
   [double]$MinShadowConfidence = 0.50,
   [int]$MaxQuoteAgeMinutes = 120,

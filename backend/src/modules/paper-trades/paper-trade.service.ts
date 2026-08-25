@@ -66,7 +66,7 @@ function settleSelection(
 
 export class PaperTradeService {
   async settlePaperTrades(matchId: string, suppliedScores?: { home_score?: number | null; away_score?: number | null }) {
-    const match = await db.query("SELECT home_score, away_score, status FROM matches WHERE id = $1", [matchId]);
+    const match = await db.query("SELECT home_score, away_score, status FROM v_valid_matches WHERE id = $1", [matchId]);
     if (!match.rows[0]) {
       return { updated: 0, reason: "MATCH_NOT_FOUND" };
     }

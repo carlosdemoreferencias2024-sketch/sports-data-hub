@@ -75,7 +75,7 @@ def generate_template(output_path: str) -> int:
               active_snapshots.entry_odds,
               active_snapshots.model_probability,
               active_snapshots.expected_value
-            FROM matches m
+            FROM v_valid_matches m
             JOIN leagues l ON l.id = m.league_id
             LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
             LEFT JOIN teams home_team ON home_team.id = home_mc.team_id

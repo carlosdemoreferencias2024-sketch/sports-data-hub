@@ -8,6 +8,10 @@
   [double]$MinEv = 0.03,
   [int]$MaxModelAgeMinutes = 240,
   [int]$MaxMarketAgeMinutes = 30,
+  [string]$MatchId = "",
+  [ValidateSet("market", "entry", "closing")]
+  [string]$SnapshotRole = "market",
+  [switch]$QuotesOnly,
   [switch]$ClosingOnly,
   [switch]$AllowQuotaSkip,
   [switch]$DryRun
@@ -21,6 +25,13 @@ if (-not $InternalApiKey) {
 }
 if (-not $SportsDataIoApiKey) {
   throw "SPORTSDATAIO_API_KEY no esta definido. Exportalo o pasalo con -SportsDataIoApiKey."
+}
+if ($MatchId) {
+  try { [void][Guid]::Parse($MatchId) } catch { throw "MatchId debe ser UUID: $MatchId" }
+}
+if ($ClosingOnly) {
+  $SnapshotRole = "closing"
+  $QuotesOnly = $true
 }
 
 $headers = @{ "X-Internal-API-Key" = $InternalApiKey }
@@ -46,6 +57,16 @@ function Convert-AmericanToDecimal($Value) {
   return [math]::Round(1 + (100 / [math]::Abs($number)), 4)
 }
 
+function Get-Sha256Hex([string]$Value) {
+  $sha = [Security.Cryptography.SHA256]::Create()
+  try {
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Value)
+    return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+  } finally {
+    $sha.Dispose()
+  }
+}
+
 function Get-TeamAbbreviation($Match, [string]$Side) {
   $competitor = @($Match.competitors | Where-Object { $_.home_away -eq $Side } | Select-Object -First 1)
   if (-not $competitor) { return "" }
@@ -53,15 +74,17 @@ function Get-TeamAbbreviation($Match, [string]$Side) {
 }
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-$statusFilter = if ($ClosingOnly) { "'scheduled','live','finished'" } else { "'scheduled','live'" }
+$statusFilter = if ($SnapshotRole -eq "closing") { "'scheduled','live','finished'" } else { "'scheduled'" }
+$matchFilter = if ($MatchId) { "AND m.id = '$MatchId'::uuid" } else { "" }
 $fixtureSql = @"
 SELECT json_agg(row_to_json(x)) AS fixtures
 FROM (
   SELECT
     m.id::text AS id,
+    m.match_date AS kickoff,
     ht.abbreviation AS home_abbreviation,
     at.abbreviation AS away_abbreviation
-  FROM matches m
+  FROM v_valid_matches m
   JOIN leagues l ON l.id = m.league_id
   JOIN match_competitors hc ON hc.match_id = m.id AND hc.home_away = 'home'
   JOIN teams ht ON ht.id = hc.team_id
@@ -70,6 +93,7 @@ FROM (
   WHERE l.slug = 'mlb'
     AND m.status IN ($statusFilter)
     AND m.match_date::date = '$dateIso'::date
+    $matchFilter
   ORDER BY m.match_date, ht.name, at.name
 ) x;
 "@
@@ -102,7 +126,7 @@ $fixtureMap = @{}
 foreach ($fixture in $hubMlbToday) {
   $key = "$($fixture.home_abbreviation)|$($fixture.away_abbreviation)"
   if (-not $fixtureMap.ContainsKey($key)) {
-    $fixtureMap[$key] = [string]$fixture.id
+    $fixtureMap[$key] = $fixture
   }
 }
 
@@ -155,19 +179,56 @@ foreach ($game in $odds) {
 
   $bookmaker = "sportsdataio_sportsbook_$($gameOdd.SportsbookId)"
   $providerUpdated = if ($gameOdd.Updated) { [string]$gameOdd.Updated } else { "" }
+  $fixture = $fixtureMap[$matchKey]
+  $capturedAt = (Get-Date).ToUniversalTime()
+  $kickoff = ([DateTimeOffset]::Parse([string]$fixture.kickoff)).UtcDateTime
+  $minutesToKickoff = ($kickoff - $capturedAt).TotalMinutes
+  $safeForEntry = $minutesToKickoff -ge 20 -and $minutesToKickoff -le 1440
+  $safeForClosing = $minutesToKickoff -ge 3 -and $minutesToKickoff -le 10
+
+  if ($SnapshotRole -eq "entry" -and -not $safeForEntry) { continue }
+  if ($SnapshotRole -eq "closing" -and -not $safeForClosing) { continue }
+
+  $homeOdds = Convert-AmericanToDecimal $gameOdd.HomeMoneyLine
+  $awayOdds = Convert-AmericanToDecimal $gameOdd.AwayMoneyLine
+  $evidenceMaterial = @{
+    provider = $ProviderName
+    source_url = $oddsUrl
+    match_id = [string]$fixture.id
+    event_id = [string]$game.GameId
+    bookmaker_event_id = [string]$gameOdd.GameOddId
+    bookmaker = $bookmaker
+    market_type = "moneyline_2way"
+    home_odds = $homeOdds
+    away_odds = $awayOdds
+    provider_updated = $providerUpdated
+    captured_at = $capturedAt.ToString("yyyy-MM-ddTHH:mm:ssZ")
+  } | ConvertTo-Json -Compress
+  $rawPayloadHash = Get-Sha256Hex $evidenceMaterial
 
   $quotes += [pscustomobject]@{
-    match_id = [string]$fixtureMap[$matchKey]
+    match_id = [string]$fixture.id
     provider_name = $ProviderName
     bookmaker = $bookmaker
     market_type = "moneyline_2way"
-    home_odds = Convert-AmericanToDecimal $gameOdd.HomeMoneyLine
-    away_odds = Convert-AmericanToDecimal $gameOdd.AwayMoneyLine
-    captured_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    home_odds = $homeOdds
+    away_odds = $awayOdds
+    captured_at = $capturedAt.ToString("yyyy-MM-ddTHH:mm:ssZ")
     event_id = [string]$game.GameId
     bookmaker_event_id = [string]$gameOdd.GameOddId
     home_team = [string]$game.HomeTeamName
     away_team = [string]$game.AwayTeamName
+    source_url = $oddsUrl
+    source_type = "provider_api"
+    evidence_id = "sportsdataio:$rawPayloadHash"
+    raw_payload_hash = $rawPayloadHash
+    verified_by = "sportsdataio_api"
+    safe_for_entry = [bool]$safeForEntry
+    safe_for_closing = [bool]$safeForClosing
+    audit_only = $false
+    stale_status = "FRESH"
+    window_status = $(if ($SnapshotRole -eq "entry") { "ENTRY_CAPTURED_ON_TIME" } elseif ($SnapshotRole -eq "closing") { "CAPTURED_ON_TIME" } else { "MARKET_CAPTURE" })
+    closing_quality = $(if ($SnapshotRole -eq "closing") { "CAPTURED_ON_TIME" } else { "NOT_CLOSING" })
     notes = "SportsDataIO trial feed; sportsbook names are scrambled; provider_updated=$providerUpdated"
   }
 }
@@ -177,7 +238,7 @@ if ($quotes.Count -lt 1) {
   $oddsSample = @($odds | Select-Object -First 5 | ForEach-Object { "$($_.HomeTeamName)|$($_.AwayTeamName)" }) -join ", "
   Write-Host "[sportsdataio] fixture_keys_sample=$fixtureSample"
   Write-Host "[sportsdataio] odds_keys_sample=$oddsSample"
-  throw "SportsDataIO respondio, pero no se pudo mapear ninguna cuota MLB Moneyline contra fixtures del Hub para $dateIso."
+  throw "SportsDataIO respondio, pero no hubo una cuota MLB verificable mapeada dentro de la ventana $SnapshotRole para $dateIso."
 }
 
 @{ quotes = $quotes } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $OutputPath -Encoding UTF8
@@ -189,12 +250,13 @@ $loaderArgs = @(
   "-InternalApiKey", $InternalApiKey,
   "-InputPath", $OutputPath,
   "-ProviderName", $ProviderName,
+  "-SnapshotRole", $SnapshotRole,
   "-MinEv", ([string]$MinEv),
   "-MaxModelAgeMinutes", ([string]$MaxModelAgeMinutes),
   "-MaxMarketAgeMinutes", ([string]$MaxMarketAgeMinutes)
 )
 if ($DryRun) { $loaderArgs += "-DryRun" }
-if ($ClosingOnly) { $loaderArgs += "-QuotesOnly" }
+if ($QuotesOnly) { $loaderArgs += "-QuotesOnly" }
 
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $loader @loaderArgs
 exit $LASTEXITCODE

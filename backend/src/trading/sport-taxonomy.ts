@@ -19,6 +19,8 @@ const SPORT_ALIASES = new Map<string, CanonicalSport>([
   ["tennis", "tennis"],
   ["tenis", "tennis"],
   ["nfl", "american_football"],
+  ["american-football", "american_football"],
+  ["american_football", "american_football"],
   ["american football", "american_football"],
   ["football americano", "american_football"],
   ["hockey", "hockey"],

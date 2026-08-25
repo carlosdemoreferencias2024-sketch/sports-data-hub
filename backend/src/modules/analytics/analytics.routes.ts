@@ -44,7 +44,8 @@ import {
   rebuildHistoricalContext
 } from "../../trading/sports-historical-intelligence.js";
 import { getMatchDataHarvesterStatus, runMatchDataHarvester } from "../../trading/match-data-harvester.js";
-import { getBottleneckBySource, getMatchPreflightStatus, runMatchPreflight } from "../../trading/match-preflight-engine.js";
+import { getBottleneckBySource, getChainPreflightStatus, getMatchPreflightStatus, runChainPreflight, runMatchPreflight } from "../../trading/match-preflight-engine.js";
+import { getCandidatePreflightStatus, runCandidatePreflight } from "../../trading/candidate-preflight-engine.js";
 import { getClosingWindowWatch } from "../../trading/closing-window-watch.js";
 import { getClosingCaptureDraft } from "../../trading/closing-capture-draft.js";
 import { getFootballManualLineupStatus, recordFootballManualVerifiedLineup } from "../../trading/football-manual-lineups.js";
@@ -60,8 +61,31 @@ import { getOperationalAlerts } from "../../trading/operational-alerts.js";
 import { getCleanSampleQueue } from "../../trading/clean-sample-queue.js";
 import { getOddsSnapshotCache, recordManualOddsSnapshot } from "../../trading/odds-snapshot-cache.js";
 import { getShadowTicketChain } from "../../trading/shadow-ticket-chain.js";
+import {
+  calculateAndRecordForecastGate,
+  getForecastSampleGovernanceStatus
+} from "../../trading/forecast-sample-governance.js";
 import { sportTaxonomyMap } from "../../trading/sport-taxonomy.js";
 import { addDaysToLocalDate, tradingLocalDateWindow } from "../../trading/timezone.js";
+import {
+  computeFootballFairOdds,
+  computeFootballFairOddsV3,
+  FOOTBALL_FAIR_ODDS_MODEL_CONFIG,
+  FOOTBALL_FAIR_ODDS_V3_CONFIG,
+  footballFairOddsArtifactSha256,
+  footballFairOddsV3ArtifactSha256,
+  type FootballFairOddsContext,
+  type FootballFormObservation
+} from "../../trading/football-fair-odds-model.js";
+import { registerForecastModelVersion } from "../../trading/forecast-chain.js";
+import { runNflOwnedFairOdds } from "../../trading/nfl-fair-odds-service.js";
+import { runNbaOwnedFairOdds } from "../../trading/nba-fair-odds-service.js";
+import { runNbaNearStartContext } from "../../trading/nba-near-start-service.js";
+
+const ACTIVE_FOOTBALL_FAIR_ODDS_MODEL = process.env.FOOTBALL_FAIR_ODDS_ACTIVE_VERSION === "v2"
+  ? "sports_data_hub_football_fair_odds_v2"
+  : "sports_data_hub_football_fair_odds_v3";
+const ACTIVE_FOOTBALL_FAIR_ODDS_VERSION = process.env.FOOTBALL_FAIR_ODDS_ACTIVE_VERSION === "v2" ? "v2" : "v3";
 
 const consensusQuerySchema = z.object({
   sport: z.string().min(1).max(40).optional(),
@@ -150,6 +174,14 @@ const matchOpsQuerySchema = z.object({
   include_backlog: booleanQuery(false),
   current_slate_only: booleanQuery(true),
   include_legacy: booleanQuery(false),
+  limit: z.coerce.number().int().min(1).max(300).default(120)
+});
+
+const candidatePreflightQuerySchema = z.object({
+  match_id: z.string().uuid().optional(),
+  decision_as_of: z.string().datetime({ offset: true }).optional(),
+  date: z.string().optional(),
+  sport: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(300).default(120)
 });
 
@@ -497,7 +529,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
             2
           ) AS consensus_score
         FROM grouped g
-        JOIN matches m ON m.id = g.match_id
+        JOIN v_valid_matches m ON m.id = g.match_id
         LEFT JOIN match_competitors mh ON mh.match_id = m.id AND mh.home_away = 'home'
         LEFT JOIN teams home ON home.id = mh.team_id
         LEFT JOIN match_competitors ma ON ma.match_id = m.id AND ma.home_away = 'away'
@@ -1168,7 +1200,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
                  'linea vieja', 'watch', COUNT(*)::int,
                  jsonb_build_object('oldest', MIN(mq.captured_at), 'latest', MAX(mq.captured_at))
           FROM market_quotes mq
-          JOIN matches m ON m.id = mq.match_id
+          JOIN v_valid_matches m ON m.id = mq.match_id
           JOIN leagues l ON l.id = m.league_id
           JOIN sports s ON s.id = l.sport_id
           WHERE mq.captured_at < NOW() - INTERVAL '24 hours'
@@ -1335,7 +1367,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
             m.match_date,
             EXTRACT(EPOCH FROM (m.match_date - rps.entry_timestamp)) / 3600.0 AS hours_before_start
           FROM real_paper_snapshots rps
-          JOIN matches m ON m.id = rps.match_id
+          JOIN v_valid_matches m ON m.id = rps.match_id
           WHERE rps.sport_slug = 'baseball'
             AND rps.league_slug = 'mlb'
             AND rps.market_type = 'moneyline_2way'
@@ -1525,7 +1557,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
               ELSE 'CLEAN'
             END AS provider_status
           FROM real_paper_snapshots rps
-          JOIN matches m ON m.id = rps.match_id
+          JOIN v_valid_matches m ON m.id = rps.match_id
           LEFT JOIN match_competitors mh ON mh.match_id = m.id AND mh.home_away = 'home'
           LEFT JOIN teams home_team ON home_team.id = mh.team_id
           LEFT JOIN match_competitors ma ON ma.match_id = m.id AND ma.home_away = 'away'
@@ -1799,6 +1831,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
   async function buildPickExplainability(rawQuery: unknown = {}) {
     const query = z.object({
       date: z.string().optional(),
+      match_id: z.string().uuid().optional(),
       sport: z.string().default("all"),
       min_closed: z.coerce.number().int().min(1).max(500).default(30),
       limit: z.coerce.number().int().min(1).max(300).default(150)
@@ -2044,7 +2077,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
               ELSE 'pickem'
             END AS price_role
           FROM real_paper_snapshots rps
-          JOIN matches m ON m.id = rps.match_id
+          JOIN v_valid_matches m ON m.id = rps.match_id
           WHERE rps.sport_slug = 'baseball'
             AND rps.league_slug = 'mlb'
             AND rps.market_type = 'moneyline_2way'
@@ -2137,7 +2170,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
           END AS alert_level,
           latest.captured_at AS latest_snapshot_at
         FROM real_paper_snapshots rps
-        JOIN matches m ON m.id = rps.match_id
+        JOIN v_valid_matches m ON m.id = rps.match_id
         LEFT JOIN match_competitors mh ON mh.match_id = m.id AND mh.home_away = 'home'
         LEFT JOIN teams home_team ON home_team.id = mh.team_id
         LEFT JOIN match_competitors ma ON ma.match_id = m.id AND ma.home_away = 'away'
@@ -2248,7 +2281,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
             ELSE false
           END AS suspicious_move
         FROM real_paper_snapshots rps
-        JOIN matches m ON m.id = rps.match_id
+        JOIN v_valid_matches m ON m.id = rps.match_id
         LEFT JOIN match_competitors mh ON mh.match_id = m.id AND mh.home_away = 'home'
         LEFT JOIN teams home_team ON home_team.id = mh.team_id
         LEFT JOIN match_competitors ma ON ma.match_id = m.id AND ma.home_away = 'away'
@@ -2449,7 +2482,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
           m.home_score,
           m.away_score
         FROM real_paper_snapshots rps
-        JOIN matches m ON m.id = rps.match_id
+        JOIN v_valid_matches m ON m.id = rps.match_id
         WHERE rps.sport_slug = 'baseball'
           AND rps.league_slug = 'mlb'
           AND rps.market_type = 'moneyline_2way'
@@ -2510,7 +2543,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
           ELSE 'WAITING'
         END AS settlement_state
       FROM real_paper_snapshots rps
-      JOIN matches m ON m.id = rps.match_id
+      JOIN v_valid_matches m ON m.id = rps.match_id
       LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
       LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
       LEFT JOIN match_competitors away_mc ON away_mc.match_id = m.id AND away_mc.home_away = 'away'
@@ -2909,7 +2942,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
             ROUND(EXTRACT(EPOCH FROM (COALESCE(lo.latest_snapshot_at, rps.entry_timestamp) - COALESCE(lm.latest_model_generated_at, rps.entry_timestamp))) / 3600.0, 2) AS odds_vs_model_hours,
             ROUND(EXTRACT(EPOCH FROM (COALESCE(lm.latest_model_generated_at, rps.entry_timestamp) - COALESCE(lf.latest_feature_generated_at, rps.entry_timestamp))) / 3600.0, 2) AS model_vs_feature_hours
           FROM real_paper_snapshots rps
-          JOIN matches m ON m.id = rps.match_id
+          JOIN v_valid_matches m ON m.id = rps.match_id
           LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
           LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
           LEFT JOIN match_competitors away_mc ON away_mc.match_id = m.id AND away_mc.home_away = 'away'
@@ -3113,7 +3146,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
             ELSE 'Closing neutral; conservar en review.'
           END AS recommendation
         FROM real_paper_snapshots rps
-        JOIN matches m ON m.id = rps.match_id
+        JOIN v_valid_matches m ON m.id = rps.match_id
         LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
         LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
         LEFT JOIN match_competitors away_mc ON away_mc.match_id = m.id AND away_mc.home_away = 'away'
@@ -3853,7 +3886,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
             CASE WHEN rps.pick = 'home' THEN away_team.id ELSE home_team.id END AS opponent_team_id,
             CASE WHEN rps.pick = 'home' THEN away_team.name ELSE home_team.name END AS opponent_team_name
           FROM real_paper_snapshots rps
-          JOIN matches m ON m.id = rps.match_id
+          JOIN v_valid_matches m ON m.id = rps.match_id
           LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
           LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
           LEFT JOIN match_competitors away_mc ON away_mc.match_id = m.id AND away_mc.home_away = 'away'
@@ -3955,14 +3988,14 @@ export async function analyticsRoutes(app: FastifyInstance) {
           FROM (
             SELECT m.id, m.match_date
             FROM match_competitors mc
-            JOIN matches m ON m.id = mc.match_id
+            JOIN v_valid_matches m ON m.id = mc.match_id
             WHERE mc.team_id = a.picked_team_id
               AND m.status = 'finished'
               AND m.match_date < a.match_date
             ORDER BY m.match_date DESC
             LIMIT 10
           ) recent
-          JOIN matches m ON m.id = recent.id
+          JOIN v_valid_matches m ON m.id = recent.id
           JOIN match_competitors mc ON mc.match_id = m.id AND mc.team_id = a.picked_team_id
           JOIN match_competitors opp ON opp.match_id = m.id AND opp.team_id <> mc.team_id
           WHERE mc.score IS NOT NULL AND opp.score IS NOT NULL
@@ -3977,14 +4010,14 @@ export async function analyticsRoutes(app: FastifyInstance) {
           FROM (
             SELECT m.id, m.match_date
             FROM match_competitors mc
-            JOIN matches m ON m.id = mc.match_id
+            JOIN v_valid_matches m ON m.id = mc.match_id
             WHERE mc.team_id = a.opponent_team_id
               AND m.status = 'finished'
               AND m.match_date < a.match_date
             ORDER BY m.match_date DESC
             LIMIT 10
           ) recent
-          JOIN matches m ON m.id = recent.id
+          JOIN v_valid_matches m ON m.id = recent.id
           JOIN match_competitors mc ON mc.match_id = m.id AND mc.team_id = a.opponent_team_id
           JOIN match_competitors opp ON opp.match_id = m.id AND opp.team_id <> mc.team_id
           WHERE mc.score IS NOT NULL AND opp.score IS NOT NULL
@@ -3997,7 +4030,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
             ROUND(COALESCE(SUM(r.profit_loss), 0)::numeric, 4) AS profit_units,
             ROUND(AVG(r.clv) FILTER (WHERE r.clv IS NOT NULL)::numeric, 6) AS avg_clv
           FROM real_paper_snapshots r
-          JOIN matches m ON m.id = r.match_id
+          JOIN v_valid_matches m ON m.id = r.match_id
           LEFT JOIN match_competitors hmc ON hmc.match_id = m.id AND hmc.home_away = 'home'
           LEFT JOIN match_competitors amc ON amc.match_id = m.id AND amc.home_away = 'away'
           WHERE r.sport_slug = 'baseball'
@@ -4017,7 +4050,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
             ROUND(COALESCE(SUM(r.profit_loss), 0)::numeric, 4) AS profit_units,
             ROUND(AVG(r.clv) FILTER (WHERE r.clv IS NOT NULL)::numeric, 6) AS avg_clv
           FROM real_paper_snapshots r
-          JOIN matches m ON m.id = r.match_id
+          JOIN v_valid_matches m ON m.id = r.match_id
           LEFT JOIN match_competitors hmc ON hmc.match_id = m.id AND hmc.home_away = 'home'
           LEFT JOIN match_competitors amc ON amc.match_id = m.id AND amc.home_away = 'away'
           WHERE r.sport_slug = 'baseball'
@@ -4145,7 +4178,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
             CONCAT(home_team.name, ' vs ', away_team.name) AS match,
             'persisted' AS row_source
           FROM player_intelligence pi
-          LEFT JOIN matches m ON m.id = pi.match_id
+          LEFT JOIN v_valid_matches m ON m.id = pi.match_id
           LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
           LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
           LEFT JOIN match_competitors away_mc ON away_mc.match_id = m.id AND away_mc.home_away = 'away'
@@ -4179,7 +4212,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
               away_team.name AS away_team_name,
               CONCAT(home_team.name, ' vs ', away_team.name) AS match
             FROM latest_features lf
-            JOIN matches m ON m.id = lf.match_id
+            JOIN v_valid_matches m ON m.id = lf.match_id
             JOIN leagues l ON l.id = m.league_id
             LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
             LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
@@ -4377,7 +4410,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
             CONCAT(home_team.name, ' vs ', away_team.name) AS match,
             'persisted' AS row_source
           FROM intelligence_observations io
-          LEFT JOIN matches m ON m.id = io.match_id
+          LEFT JOIN v_valid_matches m ON m.id = io.match_id
           LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
           LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
           LEFT JOIN match_competitors away_mc ON away_mc.match_id = m.id AND away_mc.home_away = 'away'
@@ -4692,7 +4725,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
             ROUND(EXTRACT(EPOCH FROM (NOW() - rps.entry_timestamp)) / 3600.0, 2) AS age_hours,
             ROUND(EXTRACT(EPOCH FROM (NOW() - COALESCE(latest.captured_at, rps.entry_timestamp))) / 3600.0, 2) AS line_age_hours
           FROM real_paper_snapshots rps
-          JOIN matches m ON m.id = rps.match_id
+          JOIN v_valid_matches m ON m.id = rps.match_id
           LEFT JOIN match_competitors mh ON mh.match_id = m.id AND mh.home_away = 'home'
           LEFT JOIN teams home_team ON home_team.id = mh.team_id
           LEFT JOIN match_competitors ma ON ma.match_id = m.id AND ma.home_away = 'away'
@@ -4892,7 +4925,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
                 rps.id ASC
             ) AS canonical_snapshot_id
           FROM real_paper_snapshots rps
-          JOIN matches m ON m.id = rps.match_id
+          JOIN v_valid_matches m ON m.id = rps.match_id
           LEFT JOIN match_competitors mh ON mh.match_id = m.id AND mh.home_away = 'home'
           LEFT JOIN teams home ON home.id = mh.team_id
           LEFT JOIN match_competitors ma ON ma.match_id = m.id AND ma.home_away = 'away'
@@ -5064,7 +5097,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
             ) AS exposure_rank,
             CONCAT(home.name, ' vs ', away.name) AS match
           FROM real_paper_snapshots rps
-          JOIN matches m ON m.id = rps.match_id
+          JOIN v_valid_matches m ON m.id = rps.match_id
           LEFT JOIN match_competitors mh ON mh.match_id = m.id AND mh.home_away = 'home'
           LEFT JOIN teams home ON home.id = mh.team_id
           LEFT JOIN match_competitors ma ON ma.match_id = m.id AND ma.home_away = 'away'
@@ -5313,7 +5346,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
           rps.entry_timestamp,
           CONCAT(home.name, ' vs ', away.name) AS match
         FROM real_paper_snapshots rps
-        JOIN matches m ON m.id = rps.match_id
+        JOIN v_valid_matches m ON m.id = rps.match_id
         LEFT JOIN match_competitors mh ON mh.match_id = m.id AND mh.home_away = 'home'
         LEFT JOIN teams home ON home.id = mh.team_id
         LEFT JOIN match_competitors ma ON ma.match_id = m.id AND ma.home_away = 'away'
@@ -5679,7 +5712,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
             END AS suspicious_move,
             ROW_NUMBER() OVER (ORDER BY rps.entry_timestamp DESC) AS recent_rank
           FROM real_paper_snapshots rps
-          JOIN matches m ON m.id = rps.match_id
+          JOIN v_valid_matches m ON m.id = rps.match_id
           LEFT JOIN match_competitors mh ON mh.match_id = m.id AND mh.home_away = 'home'
           LEFT JOIN teams home_team ON home_team.id = mh.team_id
           LEFT JOIN match_competitors ma ON ma.match_id = m.id AND ma.home_away = 'away'
@@ -5892,7 +5925,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
             CASE WHEN latest.captured_at IS NOT NULL AND latest.captured_at < NOW() - INTERVAL '24 hours' THEN true ELSE false END AS is_stale,
             CASE WHEN latest.quality_score IS NOT NULL AND latest.quality_score < 80 THEN true ELSE false END AS suspicious_provider
           FROM real_paper_snapshots rps
-          JOIN matches m ON m.id = rps.match_id
+          JOIN v_valid_matches m ON m.id = rps.match_id
           LEFT JOIN match_competitors mh ON mh.match_id = m.id AND mh.home_away = 'home'
           LEFT JOIN teams home_team ON home_team.id = mh.team_id
           LEFT JOIN match_competitors ma ON ma.match_id = m.id AND ma.home_away = 'away'
@@ -6488,7 +6521,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
             home_team.name AS home_team,
             away_team.name AS away_team,
             m.raw_data
-          FROM matches m
+          FROM v_valid_matches m
           JOIN leagues l ON l.id = m.league_id
           LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
           LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
@@ -6517,7 +6550,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
             home_team.name AS home_team,
             away_team.name AS away_team
           FROM real_paper_snapshots rps
-          LEFT JOIN matches m ON m.id = rps.match_id
+          LEFT JOIN v_valid_matches m ON m.id = rps.match_id
           LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
           LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
           LEFT JOIN match_competitors away_mc ON away_mc.match_id = m.id AND away_mc.home_away = 'away'
@@ -6887,7 +6920,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
             mq.captured_at AS quote_captured_at,
             mf.feature_set,
             mf.generated_at AS feature_generated_at
-          FROM matches m
+          FROM v_valid_matches m
           JOIN leagues l ON l.id = m.league_id
           LEFT JOIN LATERAL (
             SELECT *
@@ -7636,7 +7669,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
             SELECT DISTINCT ON (mq.match_id, mq.model_name, mq.market_type, COALESCE(mq.line, -9999))
               mq.*
             FROM model_quotes mq
-            JOIN matches m ON m.id = mq.match_id
+            JOIN v_valid_matches m ON m.id = mq.match_id
             JOIN leagues l ON l.id = m.league_id
             JOIN sports s ON s.id = l.sport_id
             WHERE s.slug = 'soccer'
@@ -7674,7 +7707,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
               selection.model_fair_odds,
               COALESCE(selection.min_market_odds_for_ev, ROUND((selection.model_fair_odds * 1.03)::numeric, 4)) AS min_market_odds_for_ev
             FROM latest_model_quotes mq
-            JOIN matches m ON m.id = mq.match_id
+            JOIN v_valid_matches m ON m.id = mq.match_id
             JOIN leagues l ON l.id = m.league_id
             LEFT JOIN provider_event_mappings pem ON pem.hub_match_id = mq.match_id AND pem.is_active = TRUE
             LEFT JOIN LATERAL (
@@ -7782,7 +7815,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
           LIMIT $7
         `,
         [
-          "sports_data_hub_football_fair_odds_v1",
+          ACTIVE_FOOTBALL_FAIR_ODDS_MODEL,
           0,
           1440,
           1440,
@@ -8060,6 +8093,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
       ? value.map((item) => String(item)).filter(Boolean)
       : [];
     const numberOrNull = (value: unknown): number | null => {
+      if (value === null || value === undefined || value === "") return null;
       const numeric = Number(value);
       return Number.isFinite(numeric) ? numeric : null;
     };
@@ -8693,14 +8727,22 @@ export async function analyticsRoutes(app: FastifyInstance) {
     };
     const query = z.object({
       date: z.string().optional(),
+      match_id: z.string().uuid().optional(),
       fallback_recent: booleanQuery(true),
       apply: booleanQuery(false),
-      model_name: z.string().min(1).max(80).default("sports_data_hub_football_fair_odds_v1"),
+      model_version: z.enum(["v2", "v3"]).default(ACTIVE_FOOTBALL_FAIR_ODDS_VERSION),
+      model_name: z.string().min(1).max(80).optional(),
       min_ev: z.coerce.number().min(0).max(1).default(0.03),
       include_totals_2_5: booleanQuery(false),
       include_post_kickoff: booleanQuery(false),
       limit: z.coerce.number().int().min(1).max(200).default(80)
     }).parse(input);
+
+    const useV3 = query.model_version === "v3";
+    const modelName = query.model_name || (useV3
+      ? "sports_data_hub_football_fair_odds_v3"
+      : "sports_data_hub_football_fair_odds_v2");
+    const modelConfig = useV3 ? FOOTBALL_FAIR_ODDS_V3_CONFIG : FOOTBALL_FAIR_ODDS_MODEL_CONFIG;
 
     const generatedAt = new Date();
     const generatedAtIso = generatedAt.toISOString();
@@ -8712,6 +8754,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
     const rows = Array.isArray(bestBets.rows) ? bestBets.rows as Array<Record<string, any>> : [];
 
     const numberOrNull = (value: unknown): number | null => {
+      if (value === null || value === undefined || value === "") return null;
       const numeric = Number(value);
       return Number.isFinite(numeric) ? numeric : null;
     };
@@ -8738,37 +8781,189 @@ export async function analyticsRoutes(app: FastifyInstance) {
       if (!status) return true;
       return ["scheduled", "pending", "pre", "not_started"].includes(status);
     };
-    const confidenceFor = (row: Record<string, any>) => {
-      const contextScore = numberOrNull(row.context_score) ?? 0;
-      const base = 0.28 + (contextScore / 100) * 0.45;
-      const leaguePenalty = isObservationLeague(row) ? (isUefaShadowAllowed(row) ? 0.04 : 0.08) : 0;
-      const friendlyPenalty = isFriendly(row) ? 0.12 : 0;
-      return Number(clamp(base - leaguePenalty - friendlyPenalty, 0.25, 0.78).toFixed(4));
+    const normalizedTeamName = (value: unknown) => String(value ?? "")
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/&/g, " and ")
+      .replace(/football club|club de futbol|club|fc|sc|cf/g, "")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+    const teamsFor = (row: Record<string, any>) => {
+      const label = String(row.match || "").trim();
+      const versus = label.split(/\s+vs\s+/i);
+      if (versus.length === 2) {
+        return { homeTeam: versus[0].trim(), awayTeam: versus[1].trim() };
+      }
+      const at = label.split(/\s+@\s+/i);
+      if (at.length === 2) {
+        return { homeTeam: at[1].trim(), awayTeam: at[0].trim() };
+      }
+      return { homeTeam: "", awayTeam: "" };
     };
-    const probabilitiesFor = (row: Record<string, any>) => {
-      const contextScore = numberOrNull(row.context_score) ?? 0;
-      const league = leagueText(row);
-      const friendly = isFriendly(row);
-      const observed = isObservationLeague(row);
-      const drawBase = friendly ? 0.30 : observed ? 0.29 : 0.27;
-      const homeEdge = observed ? 0.045 : 0.055;
-      const contextLean = clamp((contextScore - 50) / 1000, -0.025, 0.025);
-      const home = clamp(0.365 + homeEdge + contextLean, 0.27, 0.56);
-      const draw = clamp(drawBase, 0.21, 0.34);
-      const away = clamp(1 - home - draw, 0.22, 0.52);
-      const total = home + draw + away;
-      return {
-        home: Number((home / total).toFixed(6)),
-        draw: Number((draw / total).toFixed(6)),
-        away: Number((away / total).toFixed(6)),
-        basis: {
-          context_score: contextScore,
-          league,
-          observed_league: observed,
-          friendly,
-          method: "home_advantage_context_prior_v1"
-        }
+    const verifiedFormFor = async (teamName: string, kickoff: unknown): Promise<FootballFormObservation[]> => {
+      if (!teamName) return [];
+      const result = await db.query(
+        `
+          SELECT
+            tms.match_id,
+            mh.match_date,
+            tms.points_for,
+            tms.points_against,
+            tms.is_home,
+            tms.source,
+            tms.source_confidence_score,
+            tms.updated_at AS captured_at,
+            mh.match_date AS feature_as_of,
+            COALESCE(
+              tms.raw_data->>'screenshot_sha256',
+              tms.raw_data->>'provider_raw_sha256',
+              mh.raw_data->>'screenshot_sha256',
+              mh.raw_data->>'provider_raw_sha256'
+            ) AS evidence_sha256,
+            CASE WHEN COALESCE(tms.raw_data->>'xg_for', tms.raw_data->>'xgFor', '') ~ '^[0-9]+(\\.[0-9]+)?$'
+              THEN COALESCE(tms.raw_data->>'xg_for', tms.raw_data->>'xgFor')::numeric END AS xg_for,
+            CASE WHEN COALESCE(tms.raw_data->>'xg_against', tms.raw_data->>'xgAgainst', '') ~ '^[0-9]+(\\.[0-9]+)?$'
+              THEN COALESCE(tms.raw_data->>'xg_against', tms.raw_data->>'xgAgainst')::numeric END AS xg_against,
+            CASE WHEN COALESCE(tms.raw_data->>'opponent_elo', tms.raw_data->>'opponentElo', '') ~ '^[0-9]+(\\.[0-9]+)?$'
+              THEN COALESCE(tms.raw_data->>'opponent_elo', tms.raw_data->>'opponentElo')::numeric END AS opponent_elo
+          FROM sports_team_match_stats tms
+          JOIN sports_match_history mh ON mh.match_id = tms.match_id
+          WHERE tms.sport IN ('football', 'soccer')
+            AND tms.normalized_team_name = $1
+            AND mh.match_date < $2::timestamptz
+            AND UPPER(mh.status) IN ('FINAL', 'FINISHED', 'FT')
+            AND tms.points_for IS NOT NULL
+            AND tms.points_against IS NOT NULL
+            AND tms.source_confidence_score >= $3
+          ORDER BY mh.match_date DESC
+          LIMIT $4
+        `,
+        [
+          normalizedTeamName(teamName),
+          new Date(String(kickoff || generatedAtIso)).toISOString(),
+          modelConfig.min_source_confidence,
+          modelConfig.max_form_matches
+        ]
+      );
+      return result.rows.map((formRow: Record<string, any>) => ({
+        matchId: String(formRow.match_id),
+        playedAt: new Date(formRow.match_date).toISOString(),
+        goalsFor: Number(formRow.points_for),
+        goalsAgainst: Number(formRow.points_against),
+        isHome: formRow.is_home === null ? null : Boolean(formRow.is_home),
+        source: String(formRow.source),
+        sourceConfidenceScore: Number(formRow.source_confidence_score),
+        evidenceSha256: formRow.evidence_sha256 ? String(formRow.evidence_sha256) : null,
+        capturedAt: new Date(formRow.captured_at).toISOString(),
+        featureAsOf: new Date(formRow.feature_as_of).toISOString(),
+        xgFor: numberOrNull(formRow.xg_for),
+        xgAgainst: numberOrNull(formRow.xg_against),
+        opponentElo: numberOrNull(formRow.opponent_elo)
+      }));
+    };
+    const verifiedContextFor = async (matchId: string, kickoff: unknown): Promise<FootballFairOddsContext> => {
+      const result = await db.query(
+        `
+          SELECT features.feature_set, features.generated_at, match.raw_data
+          FROM v_valid_matches match
+          LEFT JOIN LATERAL (
+            SELECT feature_set, generated_at
+            FROM model_features
+            WHERE match_id = match.id
+              AND generated_at < $2::timestamptz
+            ORDER BY generated_at DESC
+            LIMIT 1
+          ) features ON TRUE
+          WHERE match.id = $1::uuid
+        `,
+        [matchId, new Date(String(kickoff || generatedAtIso)).toISOString()]
+      );
+      const featureSet = result.rows[0]?.feature_set && typeof result.rows[0].feature_set === "object"
+        ? result.rows[0].feature_set as Record<string, any>
+        : {};
+      const matchRaw = result.rows[0]?.raw_data && typeof result.rows[0].raw_data === "object"
+        ? result.rows[0].raw_data as Record<string, any>
+        : {};
+      const captures = matchRaw.manual_verified_source_captures && typeof matchRaw.manual_verified_source_captures === "object"
+        ? Object.values(matchRaw.manual_verified_source_captures as Record<string, any>) as Array<Record<string, any>>
+        : [];
+      const latestCapture = (types: string[]) => captures
+        .filter((capture) => types.includes(String(capture.capture_type || "")))
+        .filter((capture) => new Date(String(capture.captured_at || "")).getTime() < new Date(String(kickoff || generatedAtIso)).getTime())
+        .sort((left, right) => new Date(String(right.captured_at)).getTime() - new Date(String(left.captured_at)).getTime())[0];
+      const evidenceFor = (capture?: Record<string, any>) => {
+        if (!capture) return undefined;
+        const sha = String(capture.data?.upstream_evidence_sha256 || capture.data?.provider_raw_sha256 || "");
+        if (!/^[a-f0-9]{64}$/i.test(sha)) return undefined;
+        return {
+          source: String(capture.source_name || "manual_verified"),
+          capturedAt: String(capture.captured_at),
+          asOf: String(capture.captured_at),
+          confidenceScore: Number(capture.confidence_score || 0),
+          evidenceSha256: sha
+        };
       };
+      const lineupCapture = latestCapture(["lineup"]);
+      const goalkeeperCapture = latestCapture(["goalkeeper"]);
+      const availabilityCapture = latestCapture(["injuries", "suspensions"]);
+      const matchStatusCapture = latestCapture(["match_status"]);
+      const statsCapture = latestCapture(["stats", "xg"]);
+      const provenance = {
+        ...(featureSet.feature_provenance && typeof featureSet.feature_provenance === "object" ? featureSet.feature_provenance : {}),
+        ...(evidenceFor(statsCapture) ? { elo: evidenceFor(statsCapture) } : {}),
+        ...(evidenceFor(matchStatusCapture) ? {
+          rest: evidenceFor(matchStatusCapture),
+          competition: evidenceFor(matchStatusCapture),
+          knockout: evidenceFor(matchStatusCapture)
+        } : {}),
+        ...(evidenceFor(availabilityCapture) ? {
+          absences: evidenceFor(availabilityCapture),
+          availability: evidenceFor(availabilityCapture)
+        } : {}),
+        ...(evidenceFor(goalkeeperCapture) ? { goalkeepers: evidenceFor(goalkeeperCapture) } : {}),
+        ...(evidenceFor(lineupCapture) ? { lineups: evidenceFor(lineupCapture) } : {})
+      };
+      const raw = { ...featureSet, ...matchRaw };
+      const stats = raw.manual_verified_stats && typeof raw.manual_verified_stats === "object"
+        ? raw.manual_verified_stats as Record<string, any>
+        : {};
+      return {
+        featureProvenance: provenance,
+        homeElo: numberOrNull(raw.home_elo ?? stats.home_elo),
+        awayElo: numberOrNull(raw.away_elo ?? stats.away_elo),
+        homeRestDays: numberOrNull(raw.home_rest_days),
+        awayRestDays: numberOrNull(raw.away_rest_days),
+        homeAbsenceImpact: numberOrNull(raw.home_absence_impact),
+        awayAbsenceImpact: numberOrNull(raw.away_absence_impact),
+        homeGoalkeeperStatus: raw.home_goalkeeper_status || (raw.goalkeeper_ready ? "confirmed_starting" : "unknown"),
+        awayGoalkeeperStatus: raw.away_goalkeeper_status || (raw.goalkeeper_ready ? "confirmed_starting" : "unknown"),
+        homeGoalkeeperImpact: numberOrNull(raw.home_goalkeeper_impact),
+        awayGoalkeeperImpact: numberOrNull(raw.away_goalkeeper_impact),
+        homeLineupCompleteness: numberOrNull(raw.home_lineup_completeness) ?? (raw.lineup_ready ? 1 : null),
+        awayLineupCompleteness: numberOrNull(raw.away_lineup_completeness) ?? (raw.lineup_ready ? 1 : null),
+        availabilityVerified: raw.availability_verified === true || raw.player_availability_manual_verified === true,
+        competitionStrength: numberOrNull(raw.competition_strength),
+        knockout: raw.knockout && typeof raw.knockout === "object" ? raw.knockout : null
+      };
+    };
+    const differentiatedModelFor = async (row: Record<string, any>) => {
+      const teams = teamsFor(row);
+      const [homeForm, awayForm, context] = await Promise.all([
+        verifiedFormFor(teams.homeTeam, row.kickoff),
+        verifiedFormFor(teams.awayTeam, row.kickoff),
+        verifiedContextFor(String(row.match_id), row.kickoff)
+      ]);
+      const modelInput = {
+        homeTeam: teams.homeTeam,
+        awayTeam: teams.awayTeam,
+        asOf: generatedAtIso,
+        homeForm,
+        awayForm
+      };
+      return useV3
+        ? computeFootballFairOddsV3({ ...modelInput, context })
+        : computeFootballFairOdds(modelInput);
     };
     const totalsProbabilitiesFor = (row: Record<string, any>) => {
       const contextScore = numberOrNull(row.context_score) ?? 0;
@@ -8796,25 +8991,80 @@ export async function analyticsRoutes(app: FastifyInstance) {
 
     const candidates = rows
       .filter((row) => row.sport === "soccer" && row.match_id)
+      .filter((row) => !query.match_id || String(row.match_id) === query.match_id)
       .filter((row) => isPlayableStatus(row))
       .filter((row) => query.include_post_kickoff || !isPostKickoff(row.kickoff))
       .slice(0, query.limit);
 
     let inserted = 0;
     let updated = 0;
+    let modelVersionsRegistered = 0;
     const outputRows: Array<Record<string, any>> = [];
+    const skippedRows: Array<Record<string, any>> = [];
 
     for (const row of candidates) {
-      const probabilities = probabilitiesFor(row);
-      const confidence = confidenceFor(row);
+      let differentiatedModel: ReturnType<typeof computeFootballFairOdds> | ReturnType<typeof computeFootballFairOddsV3>;
+      try {
+        differentiatedModel = await differentiatedModelFor(row);
+      } catch (error) {
+        skippedRows.push({
+          match_id: row.match_id,
+          match: row.match,
+          kickoff: row.kickoff,
+          status: "OWNED_FAIR_ODDS_INPUTS_MISSING",
+          reason: error instanceof Error ? error.message : "football_fair_odds_generation_failed",
+          required: {
+            min_verified_matches_per_team: modelConfig.min_form_matches,
+            min_source_confidence: modelConfig.min_source_confidence,
+            pre_kickoff_only: true,
+            market_inputs_allowed: false
+          }
+        });
+        continue;
+      }
+      const probabilities = {
+        ...differentiatedModel.probabilities,
+        basis: differentiatedModel.basis
+      };
+      const confidence = differentiatedModel.confidence;
+      const artifactSha256 = useV3 ? footballFairOddsV3ArtifactSha256() : footballFairOddsArtifactSha256();
+      const modelVersionLabel = `${modelConfig.model_family}-cutoff-${differentiatedModel.training_cutoff_date}`;
+      if (query.apply) {
+        await db.query("SELECT * FROM register_forecast_match($1::uuid)", [row.match_id]);
+      }
+      const modelVersion = query.apply
+        ? await registerForecastModelVersion({
+            versionLabel: modelVersionLabel,
+            sportSlug: "soccer",
+            modelName,
+            trainingCutoffDate: differentiatedModel.training_cutoff_date,
+            trainedAt: generatedAtIso,
+            artifactSha256,
+            configSha256: artifactSha256,
+            featureSchemaVersion: modelConfig.feature_schema_version,
+            notes: useV3
+              ? "Contextual xG/Elo model with verified feature provenance. Market odds are excluded from model inputs."
+              : "Recency-weighted verified goals model. Market odds are excluded from model inputs."
+          })
+        : null;
+      if (modelVersion) modelVersionsRegistered += 1;
       const promotionAllowed = !isFriendly(row) && (!isObservationLeague(row) || isUefaShadowAllowed(row));
       const commonRawData = {
         owned_fair_odds: true,
         fair_odds_only: true,
         not_market_odds: true,
         source: "sports_data_hub_owned_api",
-        model_name: query.model_name,
-        model_family: "football_context_prior_v1",
+        model_name: modelName,
+        model_family: modelConfig.model_family,
+        model_version_label: modelVersionLabel,
+        model_version_id: modelVersion?.id ?? null,
+        training_cutoff_date: differentiatedModel.training_cutoff_date,
+        trained_at: generatedAtIso,
+        artifact_sha256: artifactSha256,
+        feature_schema_version: modelConfig.feature_schema_version,
+        fair_odds_method_version: modelConfig.fair_odds_method_version,
+        market_inputs_used: false,
+        independence_attestation: "Market quote is comparison-only and was not used to generate probabilities.",
         target_model_family: "dixon_coles_market_blend_v1",
         calibration_route: "Dixon-Coles + market no-vig blend after closed sample gate",
         blend_weight_model: 0.2,
@@ -8830,6 +9080,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
           require_two_consecutive_windows: true
         },
         calibration_required_before_real_money: true,
+        immutable_candidate_input: useV3,
         generated_at: generatedAtIso,
         promotion_allowed: promotionAllowed,
         shadow_allowlist_reason: isUefaShadowAllowed(row) ? "UEFA_QUALIFIER_SHADOW_ONLY" : null,
@@ -8837,14 +9088,15 @@ export async function analyticsRoutes(app: FastifyInstance) {
         real_money_enabled: false,
         kelly_enabled: false,
         telegram_auto_enabled: false,
-        basis: probabilities.basis
+        basis: probabilities.basis,
+        expected_goals: differentiatedModel.expected_goals
       };
       const moneyline: Record<string, any> = {
         match_id: row.match_id,
         match: row.match,
         league_id: row.league_id,
         kickoff: row.kickoff,
-        model_name: query.model_name,
+        model_name: modelName,
         market_type: "moneyline_3way",
         line: null,
         home_probability: probabilities.home,
@@ -8857,6 +9109,14 @@ export async function analyticsRoutes(app: FastifyInstance) {
         draw_min_market_odds_for_ev: minMarketOdds(probabilities.draw),
         away_min_market_odds_for_ev: minMarketOdds(probabilities.away),
         confidence,
+        model_family: modelConfig.model_family,
+        model_version_label: modelVersionLabel,
+        model_version_id: modelVersion?.id ?? null,
+        training_cutoff_date: differentiatedModel.training_cutoff_date,
+        expected_goals_home: differentiatedModel.expected_goals.home,
+        expected_goals_away: differentiatedModel.expected_goals.away,
+        market_inputs_used: false,
+        audit_basis: differentiatedModel.basis,
         status: promotionAllowed ? "OWNED_FAIR_ODDS_READY" : "OWNED_FAIR_ODDS_OBSERVATION_ONLY",
         recommendation: promotionAllowed
           ? "Usar como precio justo interno; requiere cuota real para calcular EV."
@@ -8938,7 +9198,18 @@ export async function analyticsRoutes(app: FastifyInstance) {
             JSON.stringify(quoteRawData)
           ];
           const insertResult = await db.query(
-            `
+            useV3 ? `
+              INSERT INTO model_quotes (
+                match_id, model_name, market_type, line,
+                home_probability, away_probability, draw_probability,
+                home_fair_odds, away_fair_odds, draw_fair_odds,
+                confidence, generated_at, raw_data
+              ) VALUES (
+                $1::uuid, $2::varchar, $3::varchar, $4::numeric,
+                $5, $6, $7, $8, $9, $10, $11, $12::timestamptz, $13::jsonb
+              )
+              RETURNING id
+            ` : `
               INSERT INTO model_quotes (
                 match_id, model_name, market_type, line,
                 home_probability, away_probability, draw_probability,
@@ -8966,7 +9237,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
           );
           const insertedRows = insertResult.rowCount ?? insertResult.rows.length;
           inserted += insertedRows;
-          if (insertedRows === 0) {
+          if (!useV3 && insertedRows === 0) {
             const updateResult = await db.query(
               `
                 UPDATE model_quotes existing
@@ -9002,15 +9273,18 @@ export async function analyticsRoutes(app: FastifyInstance) {
       generated_at: generatedAtIso,
       dry_run: !query.apply,
       apply_requested: query.apply,
-      model_name: query.model_name,
+      model_name: modelName,
       scanned_matches: rows.length,
-      priced_matches: candidates.length,
+      priced_matches: candidates.length - skippedRows.length,
       quotes_generated: outputRows.length,
       inserted,
       updated,
+      model_versions_registered: modelVersionsRegistered,
+      skipped_matches: skippedRows.length,
       markets: query.include_totals_2_5 ? ["moneyline_3way", "draw_no_bet", "over_under_2_5"] : ["moneyline_3way", "draw_no_bet"],
       note: "Estas son odds justas propias/model odds. No son cuotas reales de mercado y no calculan EV financiero por si solas.",
       rows: outputRows,
+      skipped_rows: skippedRows,
       guardrails: {
         real_candidate_count: 0,
         real_money_enabled: false,
@@ -9099,6 +9373,24 @@ export async function analyticsRoutes(app: FastifyInstance) {
   app.post("/api/v1/internal/analytics/football-owned-fair-odds/run", async (request) => runFootballOwnedFairOdds(request.query, request.body));
   app.post("/api/v1/trading/football-owned-fair-odds/run", async (request) => runFootballOwnedFairOdds(request.query, request.body));
   app.post("/api/trading/football-owned-fair-odds/run", async (request) => runFootballOwnedFairOdds(request.query, request.body));
+  app.get("/api/v1/internal/analytics/nfl-owned-fair-odds/status", async (request) => runNflOwnedFairOdds(request.query));
+  app.get("/api/v1/trading/nfl-owned-fair-odds/status", async (request) => runNflOwnedFairOdds(request.query));
+  app.get("/api/trading/nfl-owned-fair-odds/status", async (request) => runNflOwnedFairOdds(request.query));
+  app.post("/api/v1/internal/analytics/nfl-owned-fair-odds/run", async (request) => runNflOwnedFairOdds(request.query, request.body));
+  app.post("/api/v1/trading/nfl-owned-fair-odds/run", async (request) => runNflOwnedFairOdds(request.query, request.body));
+  app.post("/api/trading/nfl-owned-fair-odds/run", async (request) => runNflOwnedFairOdds(request.query, request.body));
+  app.get("/api/v1/internal/analytics/nba-owned-fair-odds/status", async (request) => runNbaOwnedFairOdds(request.query));
+  app.get("/api/v1/trading/nba-owned-fair-odds/status", async (request) => runNbaOwnedFairOdds(request.query));
+  app.get("/api/trading/nba-owned-fair-odds/status", async (request) => runNbaOwnedFairOdds(request.query));
+  app.post("/api/v1/internal/analytics/nba-owned-fair-odds/run", async (request) => runNbaOwnedFairOdds(request.query, request.body));
+  app.post("/api/v1/trading/nba-owned-fair-odds/run", async (request) => runNbaOwnedFairOdds(request.query, request.body));
+  app.post("/api/trading/nba-owned-fair-odds/run", async (request) => runNbaOwnedFairOdds(request.query, request.body));
+  app.get("/api/v1/internal/analytics/nba-near-start-context/status", async (request) => runNbaNearStartContext(request.query));
+  app.get("/api/v1/trading/nba-near-start-context/status", async (request) => runNbaNearStartContext(request.query));
+  app.get("/api/trading/nba-near-start-context/status", async (request) => runNbaNearStartContext(request.query));
+  app.post("/api/v1/internal/analytics/nba-near-start-context/run", async (request) => runNbaNearStartContext(request.query, request.body));
+  app.post("/api/v1/trading/nba-near-start-context/run", async (request) => runNbaNearStartContext(request.query, request.body));
+  app.post("/api/trading/nba-near-start-context/run", async (request) => runNbaNearStartContext(request.query, request.body));
   app.get("/api/v1/internal/analytics/football-market-lab", async () => getFootballMarketLab(db));
   app.get("/api/v1/trading/football-market-lab", async () => getFootballMarketLab(db));
   app.get("/api/trading/football-market-lab", async () => getFootballMarketLab(db));
@@ -9172,6 +9464,10 @@ export async function analyticsRoutes(app: FastifyInstance) {
   app.get("/api/v1/internal/analytics/match-preflight/status", async (request) => getMatchPreflightStatus(db, matchOpsQuerySchema.parse(request.query)));
   app.get("/api/v1/trading/match-preflight/status", async (request) => getMatchPreflightStatus(db, matchOpsQuerySchema.parse(request.query)));
   app.get("/api/trading/match-preflight/status", async (request) => getMatchPreflightStatus(db, matchOpsQuerySchema.parse(request.query)));
+  app.get("/api/v1/internal/analytics/chain-preflight/status", async (request) => getChainPreflightStatus(db, matchOpsQuerySchema.parse(request.query)));
+  app.get("/api/v1/trading/chain-preflight/status", async (request) => getChainPreflightStatus(db, matchOpsQuerySchema.parse(request.query)));
+  app.get("/api/v1/internal/analytics/candidate-preflight/status", async (request) => getCandidatePreflightStatus(db, candidatePreflightQuerySchema.parse(request.query)));
+  app.get("/api/v1/trading/candidate-preflight/status", async (request) => getCandidatePreflightStatus(db, candidatePreflightQuerySchema.parse(request.query)));
   app.get("/api/v1/internal/analytics/bottleneck-by-source", async (request) => getBottleneckBySource(db, matchOpsQuerySchema.parse(request.query)));
   app.get("/api/v1/trading/bottleneck-by-source", async (request) => getBottleneckBySource(db, matchOpsQuerySchema.parse(request.query)));
   app.get("/api/trading/bottleneck-by-source", async (request) => getBottleneckBySource(db, matchOpsQuerySchema.parse(request.query)));
@@ -9228,6 +9524,10 @@ export async function analyticsRoutes(app: FastifyInstance) {
   app.get("/api/v1/internal/analytics/shadow-ticket-chain", async (request) => getShadowTicketChain(db, matchOpsQuerySchema.parse(request.query)));
   app.get("/api/v1/trading/shadow-ticket-chain", async (request) => getShadowTicketChain(db, matchOpsQuerySchema.parse(request.query)));
   app.get("/api/trading/shadow-ticket-chain", async (request) => getShadowTicketChain(db, matchOpsQuerySchema.parse(request.query)));
+  app.get("/api/v1/internal/analytics/forecast-sample-governance", async () => getForecastSampleGovernanceStatus());
+  app.get("/api/v1/trading/forecast-sample-governance", async () => getForecastSampleGovernanceStatus());
+  app.get("/api/trading/forecast-sample-governance", async () => getForecastSampleGovernanceStatus());
+  app.post("/api/v1/internal/analytics/forecast-sample-gate/calculate", async () => calculateAndRecordForecastGate());
   app.get("/api/v1/internal/analytics/sport-taxonomy-map", async () => sportTaxonomyMap());
   app.get("/api/v1/trading/sport-taxonomy-map", async () => sportTaxonomyMap());
   app.get("/api/trading/sport-taxonomy-map", async () => sportTaxonomyMap());
@@ -9295,6 +9595,10 @@ export async function analyticsRoutes(app: FastifyInstance) {
   app.post("/api/v1/internal/analytics/match-preflight/run", async (request) => runMatchPreflight(db, matchOpsQuerySchema.parse(mergeQueryBody(request.query, request.body))));
   app.post("/api/v1/trading/match-preflight/run", async (request) => runMatchPreflight(db, matchOpsQuerySchema.parse(mergeQueryBody(request.query, request.body))));
   app.post("/api/trading/match-preflight/run", async (request) => runMatchPreflight(db, matchOpsQuerySchema.parse(mergeQueryBody(request.query, request.body))));
+  app.post("/api/v1/internal/analytics/chain-preflight/run", async (request) => runChainPreflight(db, matchOpsQuerySchema.parse(mergeQueryBody(request.query, request.body))));
+  app.post("/api/v1/trading/chain-preflight/run", async (request) => runChainPreflight(db, matchOpsQuerySchema.parse(mergeQueryBody(request.query, request.body))));
+  app.post("/api/v1/internal/analytics/candidate-preflight/run", async (request) => runCandidatePreflight(db, candidatePreflightQuerySchema.parse(mergeQueryBody(request.query, request.body))));
+  app.post("/api/v1/trading/candidate-preflight/run", async (request) => runCandidatePreflight(db, candidatePreflightQuerySchema.parse(mergeQueryBody(request.query, request.body))));
   app.get("/api/v1/internal/analytics/match-data-harvester/status", async (request) => getMatchDataHarvesterStatus(db, matchOpsQuerySchema.parse(request.query)));
   app.get("/api/v1/trading/match-data-harvester/status", async (request) => getMatchDataHarvesterStatus(db, matchOpsQuerySchema.parse(request.query)));
   app.get("/api/trading/match-data-harvester/status", async (request) => getMatchDataHarvesterStatus(db, matchOpsQuerySchema.parse(request.query)));
@@ -9633,7 +9937,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
               ELSE 'UNCLASSIFIED_LOSS'
             END AS error_type
           FROM real_paper_snapshots rps
-          JOIN matches m ON m.id = rps.match_id
+          JOIN v_valid_matches m ON m.id = rps.match_id
           LEFT JOIN match_competitors mh ON mh.match_id = m.id AND mh.home_away = 'home'
           LEFT JOIN teams home_team ON home_team.id = mh.team_id
           LEFT JOIN match_competitors ma ON ma.match_id = m.id AND ma.home_away = 'away'
@@ -9958,7 +10262,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
           away.name AS away_team_name,
           CONCAT(home.name, ' vs ', away.name) AS match
         FROM real_paper_snapshots rps
-        JOIN matches m ON m.id = rps.match_id
+        JOIN v_valid_matches m ON m.id = rps.match_id
         LEFT JOIN match_competitors mh ON mh.match_id = m.id AND mh.home_away = 'home'
         LEFT JOIN teams home ON home.id = mh.team_id
         LEFT JOIN match_competitors ma ON ma.match_id = m.id AND ma.home_away = 'away'
@@ -9978,28 +10282,4 @@ export async function analyticsRoutes(app: FastifyInstance) {
     };
   });
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

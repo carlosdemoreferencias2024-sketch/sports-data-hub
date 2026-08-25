@@ -23,6 +23,11 @@ import { analyticsRoutes } from "./modules/analytics/analytics.routes.js";
 
 export function buildApp() {
   const app = Fastify({ logger: true });
+  const allowedOrigins = new Set(
+    env.ALLOWED_ORIGINS.split(",")
+      .map((origin) => origin.trim())
+      .filter(Boolean)
+  );
 
   app.register(websocket);
   app.register(swagger, {
@@ -55,42 +60,34 @@ export function buildApp() {
   });
 
   app.addHook("onRequest", async (request, reply) => {
+    const origin = request.headers.origin;
+    if (origin && !allowedOrigins.has(origin)) {
+      return reply.status(403).send({ error: "origin_not_allowed" });
+    }
+
     if (request.method === "OPTIONS") {
-      reply.header("Access-Control-Allow-Origin", "*");
+      if (origin) {
+        reply.header("Access-Control-Allow-Origin", origin);
+        reply.header("Vary", "Origin");
+      }
       reply.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
       reply.header("Access-Control-Allow-Headers", "Content-Type,Authorization,X-API-Key,X-Internal-API-Key");
       return reply.status(204).send();
     }
   });
 
-  app.addHook("onRequest", async (request, reply) => {
-    if (!request.url.startsWith("/api/v1/internal") && !request.url.startsWith("/internal")) {
-      return;
-    }
+  app.addHook("onRequest", apiKeyHook);
 
-    const expectedKey = env.INTERNAL_API_KEY ?? env.API_KEY;
-    if (!expectedKey) {
-      return;
+  app.addHook("onSend", async (request, reply, payload) => {
+    const origin = request.headers.origin;
+    if (origin && allowedOrigins.has(origin)) {
+      reply.header("Access-Control-Allow-Origin", origin);
+      reply.header("Vary", "Origin");
     }
-
-    const providedKey = request.headers["x-internal-api-key"] ?? request.headers["x-api-key"];
-    if (providedKey !== expectedKey) {
-      request.log.warn({ ip: request.ip, url: request.url }, "Unauthorized internal request");
-      return reply.status(401).send({
-        error: "Unauthorized",
-        message: "No tienes permisos para interactuar con la ingesta interna."
-      });
-    }
-  });
-
-  app.addHook("onSend", async (_request, reply, payload) => {
-    reply.header("Access-Control-Allow-Origin", "*");
     reply.header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     reply.header("Access-Control-Allow-Headers", "Content-Type,Authorization,X-API-Key,X-Internal-API-Key");
     return payload;
   });
-
-  app.addHook("onRequest", apiKeyHook);
 
   app.get("/health", async () => {
     await Promise.all([checkDatabase(), checkRedis()]);

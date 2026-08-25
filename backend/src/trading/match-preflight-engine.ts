@@ -39,6 +39,8 @@ function normalizeSport(input?: string) {
   const sport = String(input || "all").toLowerCase();
   if (["football", "soccer", "futbol", "fútbol"].includes(sport)) return "soccer";
   if (["baseball", "mlb"].includes(sport)) return "baseball";
+  if (["nfl", "american-football", "american_football", "american football"].includes(sport)) return "american_football";
+  if (["nba", "basketball", "baloncesto"].includes(sport)) return "basketball";
   return "all";
 }
 
@@ -91,9 +93,9 @@ function hasAny(raw: Record<string, any>, keys: string[]) {
   return keys.some((key) => hasObjectData(raw[key]));
 }
 
-function hasCompleteLineup(value: unknown) {
-  if (Array.isArray(value)) return value.length >= 11;
-  if (value && typeof value === "object") return Object.keys(value as Record<string, unknown>).length >= 11;
+function hasCompleteLineup(value: unknown, expectedPlayers = 11) {
+  if (Array.isArray(value)) return value.length >= expectedPlayers;
+  if (value && typeof value === "object") return Object.keys(value as Record<string, unknown>).length >= expectedPlayers;
   return false;
 }
 
@@ -208,6 +210,26 @@ function missingDiagnostic(
       recommended_action: "Run football near-start; if provider is silent, load manual_verified official lineup only.",
       can_be_automated: true,
       priority: 20
+    },
+    nba_injury_report: {
+      source_needed: "ESPN NBA injury report capture",
+      resolver_module: "nba near-start scraper",
+      blocking_level: "HARD_BLOCK",
+      why_stuck: "No pre-tipoff injury report was attached for both NBA teams.",
+      next_run_window: "90 a 20 min before tipoff; refresh through lineup lock",
+      recommended_action: "Run NBA near-start and require both team groups, even when a group contains zero injuries.",
+      can_be_automated: true,
+      priority: 18
+    },
+    nba_load_management: {
+      source_needed: "ESPN NBA recent schedule plus explicit rest designations",
+      resolver_module: "nba near-start scraper",
+      blocking_level: "HARD_BLOCK",
+      why_stuck: "Back-to-back and recent workload context is missing or incomplete.",
+      next_run_window: "calendar refresh, then 90 a 20 min before tipoff",
+      recommended_action: "Rebuild schedule-derived workload; keep inferred load separate from official rest designations.",
+      can_be_automated: true,
+      priority: 19
     },
     goalkeeper: {
       source_needed: "official lineup",
@@ -415,6 +437,11 @@ function computePreflight(row: Record<string, any>, now = new Date()) {
     && entryChainReady;
   const hasTicket = !!row.paper_trade_id || !!row.real_paper_snapshot_id;
   const footballLineupReady = (hasCompleteLineup(raw.home_lineup) && hasCompleteLineup(raw.away_lineup)) || isAffirmative(raw.lineup_ready);
+  const nbaHomeLineupReady = hasCompleteLineup(raw.home_lineup, 5) && isAffirmative(raw.home_lineup_confirmed);
+  const nbaAwayLineupReady = hasCompleteLineup(raw.away_lineup, 5) && isAffirmative(raw.away_lineup_confirmed);
+  const nbaLineupReady = nbaHomeLineupReady && nbaAwayLineupReady && isAffirmative(raw.starting_lineups_confirmed);
+  const nbaInjuryReady = isAffirmative(raw.injury_report_present);
+  const nbaLoadReady = isAffirmative(raw.load_management_context_complete) && hasObjectData(raw.load_management_context);
   const goalkeeperReady = (!!raw.goalkeeper_home && !!raw.goalkeeper_away) || isAffirmative(raw.goalkeeper_ready);
   const mlbPitcherHome = firstPresent(raw, ["probable_pitcher_home", "home_probable_pitcher", "home_starting_pitcher", "probable_home_pitcher"]);
   const mlbPitcherAway = firstPresent(raw, ["probable_pitcher_away", "away_probable_pitcher", "away_starting_pitcher", "probable_away_pitcher"]);
@@ -440,12 +467,20 @@ function computePreflight(row: Record<string, any>, now = new Date()) {
   );
   const mlbParkReady = hasAny(raw, ["park_context", "park", "ballpark", "venue", "park_factor"]);
   const mlbWeatherReady = hasValidWeatherContext(raw);
-  const lineupReady = sport === "baseball" ? mlbLineupReady : footballLineupReady;
+  const lineupReady = sport === "baseball" ? mlbLineupReady : sport === "basketball" ? nbaLineupReady : footballLineupReady;
   const pitcherReady = sport === "baseball" ? mlbPitcherReady : true;
-  const playerContextReady = lineupReady && (sport === "baseball" ? pitcherReady : (goalkeeperReady || raw.goalkeeper_status === "CONFIRMED"));
+  const playerContextReady = lineupReady && (
+    sport === "baseball"
+      ? pitcherReady
+      : sport === "basketball"
+        ? nbaInjuryReady
+        : (goalkeeperReady || raw.goalkeeper_status === "CONFIRMED")
+  );
   const teamContextReady = !!raw.team_context_complete || !!raw.team_context || !!raw.team_intelligence || numberReady(raw.team_context_score);
   const contextReady = sport === "baseball"
     ? Boolean(playerContextReady && mlbBullpenReady && mlbParkReady && mlbWeatherReady)
+    : sport === "basketball"
+      ? Boolean(teamContextReady && playerContextReady && nbaLoadReady)
     : Boolean(teamContextReady && playerContextReady);
   const clvValidForSegments = closingReady && numberReady(row.clv ?? raw.clv);
   const missing: string[] = [];
@@ -468,6 +503,10 @@ function computePreflight(row: Record<string, any>, now = new Date()) {
   if (lineupReady) whyYes.push(sport === "baseball" ? "lineup/batting order presente" : "lineup presente");
   else missing.push(sport === "baseball" ? "lineup_batting_order" : "player_intelligence_lineup");
   if (sport === "soccer" && !goalkeeperReady) missing.push("goalkeeper");
+  if (sport === "basketball") {
+    if (!nbaInjuryReady) missing.push("nba_injury_report");
+    if (!nbaLoadReady) missing.push("nba_load_management");
+  }
   if (sport === "baseball") {
     if (!mlbPitcherHome) missing.push("probable_pitcher_home");
     if (!mlbPitcherAway) missing.push("probable_pitcher_away");
@@ -512,6 +551,10 @@ function computePreflight(row: Record<string, any>, now = new Date()) {
     preflightStatus = "CONTEXT_GAPS";
     whyNo.push("Football: EV no basta; lineup, portero y team/player context son gate duro antes de closing/paper.");
     nextAction = "Completar lineup/portero/bajas con fuente verificada; luego esperar closing valido.";
+  } else if (sport === "basketball" && !contextReady && !kickoffPassed) {
+    preflightStatus = "CONTEXT_GAPS";
+    whyNo.push("NBA: EV no basta; injury report, cinco titulares oficiales y carga son gate duro.");
+    nextAction = "Correr NBA near-start y exigir injury report, cinco titulares por equipo y carga completa.";
   } else if (hasTicket && !closingReady) {
     preflightStatus = kickoffPassed ? "POST_KICKOFF_AUDIT_ONLY" : "WAITING_VALID_CLOSING";
     whyNo.push(closingInvalid ? `Closing no valido: ${closingQuality || "UNKNOWN"}` : "Falta closing valido.");
@@ -529,7 +572,9 @@ function computePreflight(row: Record<string, any>, now = new Date()) {
     whyNo.push("Falta contexto deportivo suficiente.");
     nextAction = sport === "baseball"
       ? "Completar pitchers, lineups, bullpen y travel/rest."
-      : "Completar lineup, portero, bajas y team/player context.";
+      : sport === "basketball"
+        ? "Completar injury report, cinco titulares oficiales y gestion de carga."
+        : "Completar lineup, portero, bajas y team/player context.";
   } else if (financialReady && contextReady && hasTicket) {
     preflightStatus = sport === "baseball" ? "BETTABLE_PAPER" : "READY_FOR_SHADOW_REVIEW";
     nextAction = "Seguir cadena paper; exigir closing/settlement antes de confiar.";
@@ -575,8 +620,10 @@ function computePreflight(row: Record<string, any>, now = new Date()) {
     pitcher_stats_ready: sport === "baseball" ? Boolean(mlbHomePitcherStatsReady && mlbAwayPitcherStatsReady) : null,
     lineup_context_ready: sport === "baseball" ? mlbLineupContextReady : null,
     batting_order_complete: sport === "baseball" ? mlbBattingOrderComplete : null,
-    home_lineup_ready: sport === "baseball" ? mlbHomeLineupReady : null,
-    away_lineup_ready: sport === "baseball" ? mlbAwayLineupReady : null,
+    home_lineup_ready: sport === "baseball" ? mlbHomeLineupReady : sport === "basketball" ? nbaHomeLineupReady : null,
+    away_lineup_ready: sport === "baseball" ? mlbAwayLineupReady : sport === "basketball" ? nbaAwayLineupReady : null,
+    injury_report_ready: sport === "basketball" ? nbaInjuryReady : null,
+    load_management_ready: sport === "basketball" ? nbaLoadReady : null,
     bullpen_context_ready: sport === "baseball" ? mlbBullpenReady : null,
     weather_context_ready: sport === "baseball" ? mlbWeatherReady : null,
     park_context_ready: sport === "baseball" ? mlbParkReady : null,
@@ -724,7 +771,7 @@ export async function getMatchPreflightStatus(db: Queryable, input: MatchPreflig
           pt.raw_data,
           pt.placed_at AS sort_timestamp
         FROM paper_trades pt
-        LEFT JOIN matches m ON m.id = pt.match_id
+        LEFT JOIN v_valid_matches m ON m.id = pt.match_id
         WHERE pt.league_type = 'football_shadow'
           AND (
             (m.match_date >= $1::timestamptz AND m.match_date < $2::timestamptz)
@@ -791,7 +838,7 @@ export async function getMatchPreflightStatus(db: Queryable, input: MatchPreflig
             ) AS raw_data,
           rps.entry_timestamp AS sort_timestamp
         FROM real_paper_snapshots rps
-        LEFT JOIN matches m ON m.id = rps.match_id
+        LEFT JOIN v_valid_matches m ON m.id = rps.match_id
         LEFT JOIN latest_features lf ON lf.match_id = rps.match_id
         LEFT JOIN venues v ON v.id = m.venue_id
         LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
@@ -825,11 +872,85 @@ export async function getMatchPreflightStatus(db: Queryable, input: MatchPreflig
             OR rps.status NOT IN ('WIN', 'LOSS', 'PUSH', 'VOID', 'SETTLED', 'ARCHIVED')
             OR COALESCE((rps.raw_data->>'clean_v2_eligible')::boolean, false)
           )
+      ),
+      nba AS (
+        SELECT
+          NULL::uuid AS paper_trade_id,
+          rps.id AS real_paper_snapshot_id,
+          rps.match_id,
+          'basketball' AS sport,
+          rps.league_slug AS league,
+          COALESCE(home_team.name, 'Home') AS home_team,
+          COALESCE(away_team.name, 'Away') AS away_team,
+          COALESCE(away_team.name, 'Away') || ' @ ' || COALESCE(home_team.name, 'Home') AS match,
+          rps.market_type,
+          rps.pick AS selection,
+          rps.entry_odds AS market_odds,
+          rps.model_probability,
+          rps.expected_value,
+          rps.status AS ticket_status,
+          m.match_date AS kickoff,
+          COALESCE(m.status::text, rps.status) AS match_status,
+          m.home_score,
+          m.away_score,
+          COALESCE(closing_os.odds, rps.closing_odds) AS closing_odds,
+          CASE
+            WHEN closing_os.raw_data->>'closing_quality' = 'CAPTURED_ON_TIME'
+              AND COALESCE((closing_os.raw_data->>'safe_for_closing')::boolean, false)
+              AND NULLIF(closing_os.raw_data->>'evidence_id', '') IS NOT NULL
+              AND NULLIF(closing_os.raw_data->>'screenshot_sha256', '') IS NOT NULL
+            THEN 'CAPTURED_ON_TIME'
+            ELSE rps.raw_data->>'closing_quality'
+          END AS closing_quality,
+          rps.clv,
+          COALESCE(rps.raw_data, '{}'::jsonb)
+            || COALESCE(m.raw_data, '{}'::jsonb)
+            || jsonb_build_object(
+              'closing_evidence_id', closing_os.raw_data->>'evidence_id',
+              'closing_screenshot_sha256', closing_os.raw_data->>'screenshot_sha256',
+              'closing_safe_for_closing', COALESCE((closing_os.raw_data->>'safe_for_closing')::boolean, false)
+            ) AS raw_data,
+          rps.entry_timestamp AS sort_timestamp
+        FROM real_paper_snapshots rps
+        LEFT JOIN v_valid_matches m ON m.id = rps.match_id
+        LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
+        LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
+        LEFT JOIN match_competitors away_mc ON away_mc.match_id = m.id AND away_mc.home_away = 'away'
+        LEFT JOIN teams away_team ON away_team.id = away_mc.team_id
+        LEFT JOIN LATERAL (
+          SELECT os.*
+          FROM odds_snapshots os
+          WHERE os.match_id = rps.match_id
+            AND os.market_type = rps.market_type
+            AND os.line IS NOT DISTINCT FROM rps.line
+            AND os.selection = rps.pick
+            AND COALESCE(os.raw_data->>'snapshot_type', os.snapshot_role) = 'closing'
+          ORDER BY os.captured_at DESC
+          LIMIT 1
+        ) closing_os ON TRUE
+        WHERE rps.sport_slug IN ('basketball', 'nba')
+          AND rps.league_slug = 'nba'
+          AND (
+            (m.match_date >= $1::timestamptz AND m.match_date < $2::timestamptz)
+            OR ($5::boolean AND (
+              (rps.entry_timestamp >= $1::timestamptz AND rps.entry_timestamp < $2::timestamptz)
+              OR rps.status NOT IN ('WIN', 'LOSS', 'PUSH', 'VOID', 'SETTLED', 'ARCHIVED')
+            ))
+          )
+          AND COALESCE(rps.data_state, 'FRESH') = 'FRESH'
+          AND rps.duplicate_of_id IS NULL
+          AND (
+            $6::boolean
+            OR rps.status NOT IN ('WIN', 'LOSS', 'PUSH', 'VOID', 'SETTLED', 'ARCHIVED')
+            OR COALESCE((rps.raw_data->>'clean_v2_eligible')::boolean, false)
+          )
       )
       SELECT * FROM (
         SELECT * FROM football
         UNION ALL
         SELECT * FROM mlb
+        UNION ALL
+        SELECT * FROM nba
       ) all_rows
       WHERE ($3::text = 'all' OR sport = $3::text)
       ORDER BY sort_timestamp DESC NULLS LAST
@@ -843,7 +964,7 @@ export async function getMatchPreflightStatus(db: Queryable, input: MatchPreflig
     .sort((a, b) => Number(a.priority || 99999) - Number(b.priority || 99999));
   const summary = summarize(rows);
   return {
-    system_status: "MATCH_PREFLIGHT_ENGINE_SAFE_V1",
+    system_status: "CHAIN_PREFLIGHT_ENGINE_SAFE_V2",
     date: window.selectedDate,
     sport,
     filters: {
@@ -879,6 +1000,11 @@ export async function runMatchPreflight(db: Queryable, input: MatchPreflightInpu
     applied: false
   };
 }
+
+// Compatibility names remain available while callers migrate to the explicit
+// two-stage preflight API. This engine only evaluates rows after a ticket exists.
+export const getChainPreflightStatus = getMatchPreflightStatus;
+export const runChainPreflight = runMatchPreflight;
 
 export async function getBottleneckBySource(db: Queryable, input: MatchPreflightInput = {}) {
   const preflight = await getMatchPreflightStatus(db, input);
