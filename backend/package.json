@@ -14,6 +14,7 @@
     "test:historical-replay-validator": "node scripts/test-historical-replay-validator.mjs",
     "test:football-fair-odds": "node scripts/test-football-fair-odds-model.mjs",
     "test:football-operational-contract": "node scripts/test-football-operational-contract.mjs",
+    "test:football-identity-encoding": "node scripts/test-football-identity-encoding.mjs",
     "test:nfl-operational-contract": "node scripts/test-nfl-operational-contract.mjs",
     "test:nfl-fair-odds": "node scripts/test-nfl-fair-odds-model.mjs",
     "test:nba-fair-odds": "node scripts/test-nba-fair-odds-model.mjs",

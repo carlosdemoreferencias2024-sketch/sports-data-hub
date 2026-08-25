@@ -71,6 +71,12 @@ function deterministicUuid(seed: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
+const IDENTITY_ENCODING_MARKERS = ["\uFFFD", "Ã", "Â", "â€", "ðŸ", "├", "┬", "│"] as const;
+
+export function hasFootballIdentityEncodingIssue(value: string): boolean {
+  return IDENTITY_ENCODING_MARKERS.some((marker) => value.includes(marker));
+}
+
 function parseDate(value: string): Date | null {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
@@ -183,12 +189,22 @@ function fixtureSeed(input: { date?: string; leagueId: string; homeTeam: string;
   return [day, input.leagueId, normalizeText(input.homeTeam), normalizeText(input.awayTeam), input.kickoffUtc].join("|");
 }
 
+export function footballFixtureCanonicalId(input: {
+  date?: string;
+  leagueId: string;
+  homeTeam: string;
+  awayTeam: string;
+  kickoffUtc: string;
+}): string {
+  return deterministicUuid(fixtureSeed(input));
+}
+
 function getMatchId(input: { provided?: string; date?: string; leagueId: string; homeTeam: string; awayTeam: string; kickoffUtc: string }) {
   if (input.provided && uuidSchema.safeParse(input.provided).success) {
     return { matchId: input.provided, generated: false, source: "provided" as const };
   }
   return {
-    matchId: deterministicUuid(fixtureSeed(input)),
+    matchId: footballFixtureCanonicalId(input),
     generated: true,
     source: "generated" as const
   };
@@ -305,6 +321,10 @@ async function ensureObservedMatch(
     rawData?: Record<string, unknown>;
   }
 ) {
+  if ([input.leagueInput, input.homeTeam, input.awayTeam].some(hasFootballIdentityEncodingIssue)) {
+    return { ok: false as const, reason: "IDENTITY_ENCODING_INVALID", leagueId: null, matchId: null, generated: false };
+  }
+
   const league = resolveLeagueOrNull(input.leagueInput);
   if (!league) {
     return { ok: false as const, reason: "league_not_supported", leagueId: null, matchId: null, generated: false };
