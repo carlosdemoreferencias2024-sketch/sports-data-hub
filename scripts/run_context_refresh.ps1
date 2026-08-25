@@ -109,7 +109,7 @@ function Invoke-FootballCalendarRefresh([string]$RunDate) {
   } else {
     Write-Step "API-Football calendar $RunDate"
     & (Join-Path $ScriptRoot "build_api_football_universe.ps1") -ApiKey $ApiFootballKey -Date $RunDate -LeagueIds $leagueList -UseGlobalDateEndpoint -OutputPath $apiOutputPath -AllowApiOnlyTrustedKickoff
-    $apiPayload = Get-Content -LiteralPath $apiOutputPath -Raw | ConvertFrom-Json
+    $apiPayload = Get-Content -LiteralPath $apiOutputPath -Raw -Encoding UTF8 | ConvertFrom-Json
   }
 
   $apiSummaryByLeague = @{}
@@ -125,7 +125,7 @@ function Invoke-FootballCalendarRefresh([string]$RunDate) {
   if ($fallbackLeagues.Count -gt 0) {
     Write-Step "ESPN calendar fallback $RunDate leagues=$($fallbackLeagues.Count)"
     & (Join-Path $ScriptRoot "build_football_today_espn_universe.ps1") -Date $RunDate -LeagueIds $fallbackLeagues -OutputPath $espnOutputPath
-    $espnPayload = Get-Content -LiteralPath $espnOutputPath -Raw | ConvertFrom-Json
+    $espnPayload = Get-Content -LiteralPath $espnOutputPath -Raw -Encoding UTF8 | ConvertFrom-Json
     foreach ($row in @($espnPayload.fetch_summary)) { $espnSummaryByLeague[[string]$row.league_id] = $row }
   }
 

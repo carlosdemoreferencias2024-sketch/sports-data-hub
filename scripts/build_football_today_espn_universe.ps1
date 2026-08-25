@@ -67,9 +67,16 @@ function Get-NestedPropertyValue($object, [string[]]$path) {
 function Invoke-EspnJson([string]$Uri) {
   $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
   if (-not $curl) { throw "ESPN_CURL_NOT_AVAILABLE" }
-  $body = & curl.exe -sS --connect-timeout 15 --max-time 45 $Uri 2>&1
-  if ($LASTEXITCODE -ne 0) { throw "ESPN_CURL_FAILED exit=$LASTEXITCODE detail=$body" }
-  try { return $body | ConvertFrom-Json } catch { throw "ESPN_INVALID_RESPONSE $($_.Exception.Message)" }
+  $tempPath = [System.IO.Path]::GetTempFileName()
+  try {
+    $detail = & curl.exe -sS --connect-timeout 15 --max-time 45 --output $tempPath $Uri 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "ESPN_CURL_FAILED exit=$LASTEXITCODE detail=$($detail.Trim())" }
+    $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    $body = [System.IO.File]::ReadAllText($tempPath, $utf8)
+    try { return $body | ConvertFrom-Json } catch { throw "ESPN_INVALID_RESPONSE $($_.Exception.Message)" }
+  } finally {
+    Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function Get-EspnFetchError([string]$Message) {
