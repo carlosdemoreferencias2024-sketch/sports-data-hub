@@ -67,6 +67,10 @@ try {
   const capturedAt = new Date(now.getTime() - Math.min(30, Math.max(1, 1440 - leadMinutes)) * 60_000);
   const decisionAsOf = new Date(now.getTime() + 2000);
   const token = randomUUID();
+  const evidenceSuffix = token.replaceAll("-", "").slice(0, 12);
+  const homeEvidenceId = `00000000-0000-4000-8000-${evidenceSuffix}`;
+  const drawEvidenceId = `88888888-8888-4888-8888-${evidenceSuffix}`;
+  const awayEvidenceId = `ffffffff-ffff-4fff-bfff-${evidenceSuffix}`;
 
   await client.query(
     "SELECT * FROM validate_forecast_schedule($1::uuid, false, false, $2::timestamptz, NULL, $3)",
@@ -79,19 +83,36 @@ try {
 
   const evidence = await client.query(`
     INSERT INTO forecast_evidence (
-      match_id, source_type, provider_name, bookmaker, market_type, selection,
+      id, match_id, source_type, provider_name, bookmaker, market_type, selection,
       odds_value, odds_format, decimal_odds, captured_at, timing_quality,
       source_url, screenshot_sha256, verified_by, raw_payload_hash
-    ) VALUES (
-      $1, 'manual_verified', $2, 'TestBook', 'moneyline_2way', 'home',
-      2.20, 'decimal', 2.20, $3, 'UNKNOWN', 'https://example.test/entry',
-      $4, 'candidate-db-test', $5
-    ) RETURNING id
-  `, [matchId, `test-${token}`, capturedAt.toISOString(), hash(`${token}-shot`), hash(`${token}-raw`)]);
-  await client.query(
-    "SELECT * FROM register_forecast_evidence_role($1::uuid, 'entry', 'candidate-db-test')",
-    [evidence.rows[0].id]
-  );
+    ) VALUES
+      ($1, $4, 'manual_verified', $5, 'TestBook', 'moneyline_3way', 'home',
+       2.85, 'decimal', 2.85, $6, 'UNKNOWN', 'https://example.test/entry',
+       $7, 'candidate-db-test', $8),
+      ($2, $4, 'manual_verified', $5, 'TestBook', 'moneyline_3way', 'draw',
+       3.25, 'decimal', 3.25, $6, 'UNKNOWN', 'https://example.test/entry',
+       $7, 'candidate-db-test', $8),
+      ($3, $4, 'manual_verified', $5, 'TestBook', 'moneyline_3way', 'away',
+       2.55, 'decimal', 2.55, $6, 'UNKNOWN', 'https://example.test/entry',
+       $7, 'candidate-db-test', $8)
+    RETURNING id, selection
+  `, [
+    homeEvidenceId,
+    drawEvidenceId,
+    awayEvidenceId,
+    matchId,
+    `test-${token}`,
+    capturedAt.toISOString(),
+    hash(`${token}-shot`),
+    hash(`${token}-raw`)
+  ]);
+  for (const row of evidence.rows) {
+    await client.query(
+      "SELECT * FROM register_forecast_evidence_role($1::uuid, 'entry', 'candidate-db-test')",
+      [row.id]
+    );
+  }
 
   const context = await client.query(`
     INSERT INTO forecast_context_snapshots (
@@ -119,8 +140,8 @@ try {
       draw_probability, home_fair_odds, away_fair_odds, draw_fair_odds,
       confidence, generated_at, raw_data
     ) VALUES (
-      $1, 'sports_data_hub_football_fair_odds_v3', 'moneyline_2way',
-      0.55, 0.45, NULL, 1.8182, 2.2222, NULL, 0.70,
+      $1, 'sports_data_hub_football_fair_odds_v3', 'moneyline_3way',
+      0.384765, 0.351470, 0.263765, 2.5990, 2.8452, 3.7913, 0.70,
       clock_timestamp(), jsonb_build_object(
         'owned_fair_odds', true,
         'market_inputs_used', false,
@@ -136,7 +157,19 @@ try {
   );
   assert.equal(before.rows[0].verdict, "PASS", JSON.stringify(before.rows[0].reasons_json));
   assert.equal(before.rows[0].model_quote_id, quote.rows[0].id);
-  assert.ok(Number(before.rows[0].expected_value) >= 0.03);
+  assert.equal(before.rows[0].entry_evidence_id, homeEvidenceId);
+  assert.equal(Number(before.rows[0].decimal_odds), 2.85);
+  assert.equal(Number(before.rows[0].model_probability), 0.384765);
+  assert.ok(Math.abs(Number(before.rows[0].expected_value) - 0.09658025) < 1e-8);
+  assert.notEqual(before.rows[0].entry_evidence_id, awayEvidenceId, "largest UUID must not win before EV is evaluated");
+  const edgeAudit = await client.query(
+    "SELECT * FROM forecast_candidate_edge_audit WHERE candidate_snapshot_id = $1::uuid",
+    [before.rows[0].id]
+  );
+  assert.equal(edgeAudit.rows[0].selection_rule, "MAX_EV");
+  assert.equal(edgeAudit.rows[0].selected_side, "home");
+  assert.equal(edgeAudit.rows[0].considered.length, 3);
+  assert.deepEqual(edgeAudit.rows[0].considered.map((row) => row.side), ["home", "away", "draw"]);
   const verified = await client.query("SELECT verify_candidate_snapshot($1::uuid) AS valid", [before.rows[0].id]);
   assert.equal(verified.rows[0].valid, true);
 
