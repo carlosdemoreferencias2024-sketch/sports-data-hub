@@ -44,6 +44,23 @@ function Invoke-ApiFootballJson([string]$Uri) {
   return Assert-ApiFootballOk (Invoke-RestMethod -Method Get -Uri $Uri -Headers @{ "x-apisports-key" = $ApiKey } -TimeoutSec 30)
 }
 
+function Get-CalendarFetchError([string]$Message) {
+  $lower = $Message.ToLowerInvariant()
+  if ($lower -match "request limit for the day|daily.*limit|quota.*day") {
+    return [pscustomobject]@{ code = "DAILY_LIMIT_REACHED"; retryable = $false }
+  }
+  if ($lower -match "429|rate limit|too many requests") {
+    return [pscustomobject]@{ code = "RATE_LIMIT"; retryable = $true }
+  }
+  if ($lower -match "timeout|timed out|econnreset|curl_failed|502|503|504") {
+    return [pscustomobject]@{ code = "NETWORK_ERROR"; retryable = $true }
+  }
+  if ($lower -match "response_error") {
+    return [pscustomobject]@{ code = "PROVIDER_ERROR"; retryable = $false }
+  }
+  return [pscustomobject]@{ code = "UNKNOWN"; retryable = $false }
+}
+
 function Get-LeagueMeta([string]$leagueId) {
   $map = @{
     "liga-mx" = @{ api_id = 262; name = "Liga MX"; country = "Mexico" }
@@ -112,6 +129,9 @@ function Add-FixtureFromResponse($Fixtures, $Item, [string]$LeagueId, [bool]$Api
       api_football_country = [string]$Item.league.country
       api_football_season = [string]$Item.league.season
       api_football_status_short = $statusShort
+      provider_name = "api-football"
+      provider_event_id = [string]$Item.fixture.id
+      calendar_provider_status = "SUCCESS"
       venue_name = [string]$Item.fixture.venue.name
       venue_city = [string]$Item.fixture.venue.city
       real_money_enabled = $false
@@ -146,7 +166,7 @@ if ($UseGlobalDateEndpoint) {
   $targetByApiId = @{}
   foreach ($target in @($targets.ToArray())) {
     $targetByApiId[[string]$target.api_id] = $target
-    $summary.Add([pscustomobject]@{ league_id=$target.league_id; api_league_id=$target.api_id; fixtures=0; errors=0; mode="global_date_filter" })
+    $summary.Add([pscustomobject]@{ league_id=$target.league_id; api_league_id=$target.api_id; provider="API_FOOTBALL"; status="PENDING"; fixtures=0; errors=0; error_code=$null; retryable=$false; mode="global_date_filter" })
   }
   try {
     $payload = Invoke-ApiFootballJson "$BaseUrl/fixtures?date=$([uri]::EscapeDataString($Date))"
@@ -161,9 +181,18 @@ if ($UseGlobalDateEndpoint) {
         }
       }
     }
+    foreach ($row in $summary) {
+      $row.status = if ([int]$row.fixtures -gt 0) { "SUCCESS" } else { "EMPTY" }
+    }
   } catch {
-    $errors.Add([ordered]@{ endpoint="fixtures_global_date"; error=$_.Exception.Message })
-    foreach ($row in $summary) { $row.errors = [int]$row.errors + 1 }
+    $classified = Get-CalendarFetchError $_.Exception.Message
+    $errors.Add([ordered]@{ endpoint="fixtures_global_date"; code=$classified.code; retryable=$classified.retryable; error=$_.Exception.Message })
+    foreach ($row in $summary) {
+      $row.errors = [int]$row.errors + 1
+      $row.status = "ERROR"
+      $row.error_code = $classified.code
+      $row.retryable = $classified.retryable
+    }
   }
 } else {
   foreach ($target in @($targets.ToArray())) {
@@ -175,12 +204,29 @@ if ($UseGlobalDateEndpoint) {
         $added = Add-FixtureFromResponse -Fixtures $fixtures -Item $item -LeagueId ([string]$target.league_id) -ApiOnlyTrusted ([bool]$AllowApiOnlyTrustedKickoff)
         if ($added) { $count += 1 }
       }
-      $summary.Add([pscustomobject]@{ league_id=$target.league_id; api_league_id=$target.api_id; fixtures=$count; errors=0; mode="league_date_filter" })
+      $status = if ($count -gt 0) { "SUCCESS" } else { "EMPTY" }
+      $summary.Add([pscustomobject]@{ league_id=$target.league_id; api_league_id=$target.api_id; provider="API_FOOTBALL"; status=$status; fixtures=$count; errors=0; error_code=$null; retryable=$false; mode="league_date_filter" })
     } catch {
-      $errors.Add([ordered]@{ league_id=$target.league_id; api_league_id=$target.api_id; endpoint="fixtures"; error=$_.Exception.Message })
-      $summary.Add([pscustomobject]@{ league_id=$target.league_id; api_league_id=$target.api_id; fixtures=0; errors=1; mode="league_date_filter" })
+      $classified = Get-CalendarFetchError $_.Exception.Message
+      $errors.Add([ordered]@{ league_id=$target.league_id; api_league_id=$target.api_id; endpoint="fixtures"; code=$classified.code; retryable=$classified.retryable; error=$_.Exception.Message })
+      $summary.Add([pscustomobject]@{ league_id=$target.league_id; api_league_id=$target.api_id; provider="API_FOOTBALL"; status="ERROR"; fixtures=0; errors=1; error_code=$classified.code; retryable=$classified.retryable; mode="league_date_filter" })
     }
   }
+}
+
+$summaryRows = @($summary.ToArray())
+$failedLeagues = @($summaryRows | Where-Object { $_.status -eq "ERROR" }).Count
+$successfulLeagues = @($summaryRows | Where-Object { $_.status -eq "SUCCESS" }).Count
+$emptyLeagues = @($summaryRows | Where-Object { $_.status -eq "EMPTY" }).Count
+$health = if ($summaryRows.Count -gt 0 -and $failedLeagues -eq $summaryRows.Count) { "FAILED" } elseif ($failedLeagues -gt 0) { "DEGRADED" } else { "HEALTHY" }
+$runSummary = [ordered]@{
+  health = $health
+  total_leagues = $summaryRows.Count
+  successful_leagues = $successfulLeagues
+  empty_leagues = $emptyLeagues
+  failed_leagues = $failedLeagues
+  fixtures = $fixtures.Count
+  providers_used = @("API_FOOTBALL")
 }
 
 $output = [ordered]@{
@@ -195,7 +241,8 @@ $output = [ordered]@{
     telegram_auto_enabled = $false
     output_intent = "OBSERVATION_ONLY"
   }
-  fetch_summary = @($summary.ToArray())
+  fetch_summary = $summaryRows
+  run_summary = $runSummary
   errors = @($errors.ToArray())
   fixtures = @($fixtures.ToArray())
   signals = @($signals.ToArray())
@@ -207,4 +254,5 @@ $json = $output | ConvertTo-Json -Depth 24
 
 Write-Host "[api-football-universe] output=$resolvedOutput"
 Write-Host "[api-football-universe] fixtures=$($fixtures.Count) signals=$($signals.Count) intent=OBSERVATION_ONLY"
+Write-Host "[api-football-universe] health=$health success=$successfulLeagues empty=$emptyLeagues failed=$failedLeagues"
 $summary | ConvertTo-Json -Depth 8

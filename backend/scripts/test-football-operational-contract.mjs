@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { selectOperationalFocusRows } from "../dist/trading/clean-sample-queue.js";
+import { evaluateCalendarTrust } from "../dist/trading/calendar-trust-gate.js";
 import { buildCandidateQueueRow } from "../dist/trading/operational-window-orchestrator.js";
 
 const rows = [
@@ -9,6 +10,30 @@ const rows = [
   { match_id: "soccer-closing", sport: "soccer", action: "CAPTURE_CLOSING_NOW", minutes_until_start: 7, focus_score: 75 },
   { match_id: "started", sport: "soccer", action: "POST_KICKOFF_AUDIT_ONLY", minutes_until_start: -1, focus_score: 100 }
 ];
+
+const trustedCalendar = evaluateCalendarTrust({
+  matchId: "soccer-trusted",
+  providerEventId: "401999001",
+  kickoffAt: "2026-08-20T22:00:00.000Z",
+  scheduleValidation: "VALID",
+  identityValidation: "VALID"
+});
+assert.equal(trustedCalendar.trusted, true);
+assert.deepEqual(trustedCalendar.reasons, []);
+
+const untrustedCalendar = evaluateCalendarTrust({
+  matchId: "soccer-untrusted",
+  providerEventId: null,
+  kickoffAt: "2026-08-20T22:00:00.000Z",
+  scheduleValidation: "PENDING_CHECK",
+  identityValidation: null
+});
+assert.equal(untrustedCalendar.trusted, false);
+assert.deepEqual(untrustedCalendar.reasons, [
+  "PROVIDER_EVENT_ID_MISSING",
+  "SCHEDULE_NOT_VALID:PENDING_CHECK",
+  "IDENTITY_NOT_VALID:MISSING"
+]);
 
 const focus = selectOperationalFocusRows(rows);
 assert.deepEqual(focus.map((row) => row.match_id), ["soccer-a", "mlb-a", "soccer-closing"]);

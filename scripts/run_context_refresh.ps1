@@ -97,20 +97,101 @@ function Test-DashboardReady {
 }
 
 function Invoke-FootballCalendarRefresh([string]$RunDate) {
-  if ([string]::IsNullOrWhiteSpace($ApiFootballKey)) {
-    Write-Host "[football-calendar] API_FOOTBALL_KEY no disponible; saltando calendario API-Football." -ForegroundColor Yellow
-    return
-  }
-
   $dateStamp = ([datetime]::Parse($RunDate)).ToString("yyyyMMdd")
-  $outputPath = Join-Path $ScriptRoot ("football_today_api_football_{0}.json" -f $dateStamp)
+  $apiOutputPath = Join-Path $ScriptRoot ("football_today_api_football_{0}.json" -f $dateStamp)
+  $espnOutputPath = Join-Path $ScriptRoot ("football_today_espn_fallback_{0}.json" -f $dateStamp)
+  $mergedOutputPath = Join-Path $ScriptRoot ("football_today_calendar_{0}.json" -f $dateStamp)
   $leagueList = @($LeagueIds -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
-  Write-Step "Football calendar dry-run $RunDate"
-  & (Join-Path $ScriptRoot "build_api_football_universe.ps1") -ApiKey $ApiFootballKey -Date $RunDate -LeagueIds $leagueList -UseGlobalDateEndpoint -OutputPath $outputPath -AllowApiOnlyTrustedKickoff
-  if ($LASTEXITCODE -ne 0) { throw "build_api_football_universe fallo con exit code $LASTEXITCODE" }
+  $apiPayload = $null
+  if ([string]::IsNullOrWhiteSpace($ApiFootballKey)) {
+    Write-Host "[football-calendar] API_FOOTBALL_KEY no disponible; usando ESPN para todas las ligas." -ForegroundColor Yellow
+  } else {
+    Write-Step "API-Football calendar $RunDate"
+    & (Join-Path $ScriptRoot "build_api_football_universe.ps1") -ApiKey $ApiFootballKey -Date $RunDate -LeagueIds $leagueList -UseGlobalDateEndpoint -OutputPath $apiOutputPath -AllowApiOnlyTrustedKickoff
+    $apiPayload = Get-Content -LiteralPath $apiOutputPath -Raw | ConvertFrom-Json
+  }
 
-  $payload = Get-Content -LiteralPath $outputPath -Raw | ConvertFrom-Json
+  $apiSummaryByLeague = @{}
+  if ($null -ne $apiPayload) {
+    foreach ($row in @($apiPayload.fetch_summary)) { $apiSummaryByLeague[[string]$row.league_id] = $row }
+  }
+  $fallbackLeagues = @($leagueList | Where-Object {
+    -not $apiSummaryByLeague.ContainsKey($_) -or [string]$apiSummaryByLeague[$_].status -eq "ERROR"
+  })
+
+  $espnPayload = $null
+  $espnSummaryByLeague = @{}
+  if ($fallbackLeagues.Count -gt 0) {
+    Write-Step "ESPN calendar fallback $RunDate leagues=$($fallbackLeagues.Count)"
+    & (Join-Path $ScriptRoot "build_football_today_espn_universe.ps1") -Date $RunDate -LeagueIds $fallbackLeagues -OutputPath $espnOutputPath
+    $espnPayload = Get-Content -LiteralPath $espnOutputPath -Raw | ConvertFrom-Json
+    foreach ($row in @($espnPayload.fetch_summary)) { $espnSummaryByLeague[[string]$row.league_id] = $row }
+  }
+
+  $finalSummary = New-Object System.Collections.Generic.List[object]
+  $fixtures = New-Object System.Collections.Generic.List[object]
+  $signals = New-Object System.Collections.Generic.List[object]
+  foreach ($leagueId in $leagueList) {
+    $apiRow = if ($apiSummaryByLeague.ContainsKey($leagueId)) { $apiSummaryByLeague[$leagueId] } else { $null }
+    if ($null -ne $apiRow -and [string]$apiRow.status -ne "ERROR") {
+      $finalSummary.Add([pscustomobject]@{
+        league_id=$leagueId; provider="API_FOOTBALL"; status=[string]$apiRow.status;
+        fixtures=[int]$apiRow.fixtures; fallback_used=$false; primary_error_code=$null; error_code=$null
+      })
+      foreach ($fixture in @($apiPayload.fixtures | Where-Object { [string]$_.league -eq $leagueId })) { $fixtures.Add($fixture) }
+      foreach ($signal in @($apiPayload.signals | Where-Object { [string]$_.league -eq $leagueId })) { $signals.Add($signal) }
+      continue
+    }
+
+    $espnRow = if ($espnSummaryByLeague.ContainsKey($leagueId)) { $espnSummaryByLeague[$leagueId] } else { $null }
+    if ($null -ne $espnRow) {
+      $finalSummary.Add([pscustomobject]@{
+        league_id=$leagueId; provider="ESPN"; status=[string]$espnRow.status;
+        fixtures=[int]$espnRow.fixtures; fallback_used=$true;
+        primary_error_code=$(if ($null -ne $apiRow) { [string]$apiRow.error_code } else { "API_KEY_MISSING" });
+        error_code=$(if ([string]$espnRow.status -eq "ERROR") { [string]$espnRow.error_code } else { $null })
+      })
+      foreach ($fixture in @($espnPayload.fixtures | Where-Object { [string]$_.league -eq $leagueId })) { $fixtures.Add($fixture) }
+      foreach ($signal in @($espnPayload.signals | Where-Object { [string]$_.league -eq $leagueId })) { $signals.Add($signal) }
+    } else {
+      $finalSummary.Add([pscustomobject]@{
+        league_id=$leagueId; provider="ESPN"; status="ERROR"; fixtures=0; fallback_used=$true;
+        primary_error_code=$(if ($null -ne $apiRow) { [string]$apiRow.error_code } else { "API_KEY_MISSING" });
+        error_code="ESPN_LEAGUE_UNSUPPORTED"
+      })
+    }
+  }
+
+  $summaryRows = @($finalSummary.ToArray())
+  $failedLeagues = @($summaryRows | Where-Object { $_.status -eq "ERROR" }).Count
+  $successfulLeagues = @($summaryRows | Where-Object { $_.status -eq "SUCCESS" }).Count
+  $emptyLeagues = @($summaryRows | Where-Object { $_.status -eq "EMPTY" }).Count
+  $health = if ($failedLeagues -eq $summaryRows.Count) { "FAILED" } elseif ($failedLeagues -gt 0) { "DEGRADED" } else { "HEALTHY" }
+  $providersUsed = @($summaryRows | Select-Object -ExpandProperty provider -Unique)
+  $runSummary = [ordered]@{
+    health=$health; total_leagues=$summaryRows.Count; successful_leagues=$successfulLeagues;
+    empty_leagues=$emptyLeagues; failed_leagues=$failedLeagues; fixtures=$fixtures.Count;
+    providers_used=$providersUsed; fallback_leagues=$fallbackLeagues.Count
+  }
+  $apiErrors = if ($null -ne $apiPayload) { @($apiPayload.errors) } else { @() }
+  $espnErrors = if ($null -ne $espnPayload) { @($espnPayload.meta.errors) } else { @() }
+  $payload = [pscustomobject]@{
+    date=$RunDate; source="football_calendar_provider_chain"; generated_at=(Get-Date).ToUniversalTime().ToString("o");
+    dry_run=$true; fetch_summary=$summaryRows; run_summary=$runSummary;
+    errors=@(@($apiErrors) + @($espnErrors));
+    fixtures=@($fixtures.ToArray()); signals=@($signals.ToArray())
+  }
+  [System.IO.File]::WriteAllText($mergedOutputPath, ($payload | ConvertTo-Json -Depth 24), [System.Text.UTF8Encoding]::new($false))
+  Write-Host "[football-calendar] health=$health fixtures=$($fixtures.Count) success=$successfulLeagues empty=$emptyLeagues failed=$failedLeagues fallback=$($fallbackLeagues.Count)"
+
+  if ($health -eq "FAILED") {
+    $dailyLimit = @($summaryRows | Where-Object { $_.primary_error_code -eq "DAILY_LIMIT_REACHED" }).Count -gt 0
+    $prefix = if ($dailyLimit) { "NON_RETRYABLE:" } else { "" }
+    throw "${prefix}CALENDAR_ALL_PROVIDERS_FAILED date=$RunDate leagues=$($summaryRows.Count)"
+  }
+
+  Write-Step "Football calendar dry-run $RunDate"
   $payload | Add-Member -NotePropertyName "dry_run" -NotePropertyValue $true -Force
   $dry = Invoke-HubPost "/api/v1/internal/analytics/football-today-universe" $payload
   Write-Host "[football-calendar] dry_run fixtures=$($dry.fixtures_received) would_insert=$($dry.fixtures_would_insert) signals=$($dry.signals_received) blocked=$($dry.blocked) duplicates=$($dry.duplicates)"

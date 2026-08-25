@@ -1,5 +1,6 @@
 import { tradingLocalDate, tradingLocalDateWindow } from "./timezone.js";
 import { normalizeSportForFilter } from "./sport-taxonomy.js";
+import { evaluateCalendarTrust } from "./calendar-trust-gate.js";
 
 type Queryable = {
   query: (sql: string, values?: unknown[]) => Promise<{ rows: Record<string, any>[] }>;
@@ -97,6 +98,7 @@ function focusScore(row: Record<string, any>) {
   if (row.closing_snapshot_safe_for_closing) score += 10;
   if (row.status === "scheduled") score += 10;
   if (row.fixture_time_unverified) score -= 20;
+  if (row.calendar_trust_required && !row.calendar_trusted) score -= 30;
   if (row.minutes_until_start !== null && row.minutes_until_start > 0 && row.minutes_until_start <= 360) score += 10;
   if (row.minutes_until_start !== null && row.minutes_until_start <= 0) score -= 35;
   return score;
@@ -118,8 +120,9 @@ function actionForRow(row: Record<string, any>) {
     && (row.closing_screenshot_sha256 || row.closing_raw_payload_hash)
   );
 
-  if (row.fixture_time_unverified) return "FIXTURE_TIME_UNVERIFIED";
   if (minutes !== null && minutes <= 0) return "POST_KICKOFF_AUDIT_ONLY";
+  if (sport === "soccer" && !row.calendar_trusted) return "VERIFY_CALENDAR";
+  if (row.fixture_time_unverified) return "FIXTURE_TIME_UNVERIFIED";
   if (!row.model_quote_id) {
     if (sport === "soccer") return "GENERATE_OWNED_FAIR_ODDS";
     if (sport === "american_football") return "GENERATE_NFL_FAIR_ODDS";
@@ -144,6 +147,7 @@ function actionForRow(row: Record<string, any>) {
 }
 
 function nextStepForAction(action: string) {
+  if (action === "VERIFY_CALENDAR") return "Resolver provider event ID, kickoff e identidad; fair odds permanece bloqueado hasta schedule=VALID e identity=VALID.";
   if (action === "GENERATE_OWNED_FAIR_ODDS") return "Correr fair odds antes del kickoff; no aplicar post-kickoff.";
   if (action === "GENERATE_MODEL_FAIR_ODDS") return "Generar modelo/fair odds para MLB antes de near-start.";
   if (action === "GENERATE_NFL_FAIR_ODDS") return "Generar fair odds NFL auditables sin usar la cuota de mercado como input.";
@@ -168,6 +172,7 @@ function priorityForAction(action: string) {
   if (action === "CAPTURE_CLOSING_NOW") return 0;
   if (["RUN_NEAR_START_NOW", "RUN_NFL_NEAR_START_NOW", "RUN_NBA_NEAR_START_NOW", "CAPTURE_LINEUP_GOALKEEPER_NOW"].includes(action)) return 1;
   if (action === "READY_FOR_SETTLEMENT") return 2;
+  if (action === "VERIFY_CALENDAR") return 2;
   if (action === "FIXTURE_TIME_UNVERIFIED") return 2;
   if (action === "CAPTURE_ENTRY_CURRENT_ODDS" || action === "RUN_BRIDGE_REGISTER_SHADOW") return 3;
   if (action === "WAITING_VALID_CLOSING" || action === "WAITING_NEAR_START_OR_CLOSING") return 4;
@@ -261,6 +266,10 @@ export async function getCleanSampleQueue(db: Queryable, input: QueueQuery = {})
         m.match_date AS kickoff,
         m.status,
         m.raw_data->>'source_match_id' AS source_match_id,
+        forecast_mapping.provider_name AS calendar_provider_name,
+        forecast_mapping.external_match_id AS provider_event_id,
+        schedule_validation.result AS schedule_validation_status,
+        identity_validation.result AS identity_validation_status,
         CASE
           WHEN l.slug IN ('mlb', 'baseball/mlb')
             AND m.status = 'scheduled'
@@ -307,6 +316,27 @@ export async function getCleanSampleQueue(db: Queryable, input: QueueQuery = {})
       LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
       LEFT JOIN match_competitors away_mc ON away_mc.match_id = m.id AND away_mc.home_away = 'away'
       LEFT JOIN teams away_team ON away_team.id = away_mc.team_id
+      LEFT JOIN LATERAL (
+        SELECT provider_name, external_match_id
+        FROM forecast_provider_match_mappings
+        WHERE match_id = m.id
+        ORDER BY verified_at DESC, id DESC
+        LIMIT 1
+      ) forecast_mapping ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT result
+        FROM forecast_slate_validations
+        WHERE match_id = m.id AND validation_type = 'schedule'
+        ORDER BY validated_at DESC, id DESC
+        LIMIT 1
+      ) schedule_validation ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT result
+        FROM forecast_slate_validations
+        WHERE match_id = m.id AND validation_type = 'identity'
+        ORDER BY validated_at DESC, id DESC
+        LIMIT 1
+      ) identity_validation ON TRUE
       LEFT JOIN LATERAL (
         SELECT *
         FROM model_quotes
@@ -368,17 +398,34 @@ export async function getCleanSampleQueue(db: Queryable, input: QueueQuery = {})
     [window.start, window.end, sport, limit]
   );
   const rows = rowsResult.rows
-    .map((row) => {
+    .map((row): Record<string, any> => {
       const baseRow = { ...row };
-      const withMinutes = {
+      const withMinutes: Record<string, any> = {
         ...baseRow,
         minutes_until_start: minutesUntil(baseRow.kickoff),
         fixture_time_unverified: isLikelyPlaceholderKickoff(baseRow)
       };
-      const action = actionForRow(withMinutes);
-      return {
+      const calendarTrustRequired = String(withMinutes.sport) === "soccer";
+      const calendarTrust = calendarTrustRequired
+        ? evaluateCalendarTrust({
+            matchId: String(withMinutes.match_id),
+            providerEventId: withMinutes.provider_event_id ? String(withMinutes.provider_event_id) : null,
+            kickoffAt: withMinutes.kickoff ? String(withMinutes.kickoff) : null,
+            scheduleValidation: withMinutes.schedule_validation_status,
+            identityValidation: withMinutes.identity_validation_status
+          })
+        : { trusted: true, reasons: [] as string[] };
+      const withCalendarTrust = {
         ...withMinutes,
-        focus_score: focusScore(withMinutes),
+        calendar_trust_required: calendarTrustRequired,
+        calendar_trusted: calendarTrust.trusted,
+        calendar_trust_reasons: calendarTrust.reasons,
+        blockers: calendarTrust.reasons
+      };
+      const action = actionForRow(withCalendarTrust);
+      return {
+        ...withCalendarTrust,
+        focus_score: focusScore(withCalendarTrust),
         action,
         action_priority: priorityForAction(action),
         next_step: nextStepForAction(action),
@@ -413,6 +460,7 @@ export async function getCleanSampleQueue(db: Queryable, input: QueueQuery = {})
       near_start_now: count("RUN_NEAR_START_NOW") + count("RUN_NFL_NEAR_START_NOW") + count("CAPTURE_LINEUP_GOALKEEPER_NOW"),
       entry_missing: count("CAPTURE_ENTRY_CURRENT_ODDS"),
       fair_odds_missing: count("GENERATE_OWNED_FAIR_ODDS") + count("GENERATE_MODEL_FAIR_ODDS") + count("GENERATE_NFL_FAIR_ODDS") + count("GENERATE_NBA_FAIR_ODDS"),
+      verify_calendar: count("VERIFY_CALENDAR"),
       fixture_time_unverified: count("FIXTURE_TIME_UNVERIFIED"),
       waiting_valid_closing: count("WAITING_VALID_CLOSING"),
       ready_for_settlement: count("READY_FOR_SETTLEMENT"),

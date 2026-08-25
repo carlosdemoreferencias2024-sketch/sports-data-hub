@@ -2,6 +2,7 @@ param(
   [string]$Date = (Get-Date -Format "yyyy-MM-dd"),
   [string]$OutputPath,
   [string]$Source = "espn_site_api_scoreboard",
+  [string[]]$LeagueIds = @(),
   [switch]$IncludeWatchLeagues,
   [switch]$IncludeOdds
 )
@@ -63,6 +64,25 @@ function Get-NestedPropertyValue($object, [string[]]$path) {
   return $current
 }
 
+function Invoke-EspnJson([string]$Uri) {
+  $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+  if (-not $curl) { throw "ESPN_CURL_NOT_AVAILABLE" }
+  $body = & curl.exe -sS --connect-timeout 15 --max-time 45 $Uri 2>&1
+  if ($LASTEXITCODE -ne 0) { throw "ESPN_CURL_FAILED exit=$LASTEXITCODE detail=$body" }
+  try { return $body | ConvertFrom-Json } catch { throw "ESPN_INVALID_RESPONSE $($_.Exception.Message)" }
+}
+
+function Get-EspnFetchError([string]$Message) {
+  $lower = $Message.ToLowerInvariant()
+  if ($lower -match "timeout|timed out|econnreset|curl_failed|502|503|504") {
+    return [pscustomobject]@{ code = "NETWORK_ERROR"; retryable = $true }
+  }
+  if ($lower -match "invalid_response") {
+    return [pscustomobject]@{ code = "INVALID_RESPONSE"; retryable = $false }
+  }
+  return [pscustomobject]@{ code = "PROVIDER_ERROR"; retryable = $false }
+}
+
 function Add-OddsSignal {
   param(
     [System.Collections.Generic.List[object]]$Signals,
@@ -120,35 +140,49 @@ $leagueConfigs = @(
   @{ Espn = "ita.1"; League = "serie-a"; Name = "Serie A"; Tier = "favorite" },
   @{ Espn = "ger.1"; League = "bundesliga"; Name = "Bundesliga"; Tier = "favorite" },
   @{ Espn = "bra.1"; League = "brasileirao-serie-a"; Name = "Brasileirao Serie A"; Tier = "favorite" },
-  @{ Espn = "arg.1"; League = "argentina-primera-division"; Name = "Argentina Primera Division"; Tier = "favorite" }
+  @{ Espn = "arg.1"; League = "argentina-primera-division"; Name = "Argentina Primera Division"; Tier = "favorite" },
+  @{ Espn = "usa.nwsl"; League = "nwsl"; Name = "NWSL"; Tier = "watch" },
+  @{ Espn = "uefa.champions"; League = "uefa-champions-league"; Name = "UEFA Champions League"; Tier = "watch" },
+  @{ Espn = "uefa.europa"; League = "europa-league"; Name = "Europa League"; Tier = "watch" },
+  @{ Espn = "uefa.europa.conf"; League = "conference-league"; Name = "Conference League"; Tier = "watch" },
+  @{ Espn = "concacaf.leagues.cup"; League = "leagues-cup"; Name = "Leagues Cup"; Tier = "watch" },
+  @{ Espn = "conmebol.libertadores"; League = "copa-libertadores"; Name = "Copa Libertadores"; Tier = "watch" },
+  @{ Espn = "conmebol.sudamericana"; League = "copa-sudamericana"; Name = "Copa Sudamericana"; Tier = "watch" },
+  @{ Espn = "fra.1"; League = "ligue-1"; Name = "Ligue 1"; Tier = "watch" },
+  @{ Espn = "ned.1"; League = "eredivisie"; Name = "Eredivisie"; Tier = "watch" },
+  @{ Espn = "por.1"; League = "primeira-liga-portugal"; Name = "Primeira Liga Portugal"; Tier = "watch" },
+  @{ Espn = "eng.league_cup"; League = "england-league-cup"; Name = "EFL League Cup"; Tier = "watch" }
 )
 
-if ($IncludeWatchLeagues) {
-  $leagueConfigs += @(
-    @{ Espn = "fra.1"; League = "ligue-1"; Name = "Ligue 1"; Tier = "watch" },
-    @{ Espn = "ned.1"; League = "eredivisie"; Name = "Eredivisie"; Tier = "watch" },
-    @{ Espn = "por.1"; League = "primeira-liga-portugal"; Name = "Primeira Liga Portugal"; Tier = "watch" },
-    @{ Espn = "uefa.champions"; League = "uefa-champions-league"; Name = "UEFA Champions League"; Tier = "watch" },
-    @{ Espn = "uefa.europa"; League = "europa-league"; Name = "Europa League"; Tier = "watch" },
-    @{ Espn = "eng.league_cup"; League = "england-league-cup"; Name = "EFL League Cup"; Tier = "watch" },
-    @{ Espn = "usa.nwsl"; League = "nwsl"; Name = "NWSL"; Tier = "watch" }
-  )
+$requestedLeagues = @($LeagueIds | ForEach-Object { [string]$_ } | Where-Object { $_ })
+if ($requestedLeagues.Count -gt 0) {
+  $requestedLookup = @{}
+  foreach ($leagueId in $requestedLeagues) { $requestedLookup[$leagueId.Trim().ToLowerInvariant()] = $true }
+  $leagueConfigs = @($leagueConfigs | Where-Object { $requestedLookup.ContainsKey(([string]$_.League).ToLowerInvariant()) })
+} elseif (-not $IncludeWatchLeagues) {
+  $leagueConfigs = @($leagueConfigs | Where-Object { $_.Tier -eq "favorite" })
 }
 
 $fixtures = New-Object System.Collections.Generic.List[object]
 $signals = New-Object System.Collections.Generic.List[object]
 $errors = New-Object System.Collections.Generic.List[object]
+$summary = New-Object System.Collections.Generic.List[object]
 
 foreach ($config in $leagueConfigs) {
+  $fixtureCountBefore = $fixtures.Count
   $url = "https://site.api.espn.com/apis/site/v2/sports/soccer/$($config.Espn)/scoreboard?dates=$espnDate"
   try {
-    $response = Invoke-RestMethod -Method Get -Uri $url -TimeoutSec 20
+    $response = Invoke-EspnJson $url
   } catch {
+    $classified = Get-EspnFetchError $_.Exception.Message
     $errors.Add([ordered]@{
       league = $config.League
       espn_slug = $config.Espn
+      code = $classified.code
+      retryable = $classified.retryable
       error = $_.Exception.Message
     })
+    $summary.Add([pscustomobject]@{ league_id=$config.League; provider="ESPN"; status="ERROR"; fixtures=0; errors=1; error_code=$classified.code; retryable=$classified.retryable })
     continue
   }
 
@@ -171,6 +205,9 @@ foreach ($config in $leagueConfigs) {
       source = $Source
       raw_data = [ordered]@{
         espn_event_id = [string](Get-PropertyValue $event "id")
+        provider_name = "espn-soccer"
+        provider_event_id = [string](Get-PropertyValue $event "id")
+        calendar_provider_status = "SUCCESS"
         espn_uid = [string](Get-PropertyValue $event "uid")
         espn_slug = $config.Espn
         espn_league_name = $config.Name
@@ -203,17 +240,35 @@ foreach ($config in $leagueConfigs) {
       }
     }
   }
+  $fixtureCount = $fixtures.Count - $fixtureCountBefore
+  $fetchStatus = if ($fixtureCount -gt 0) { "SUCCESS" } else { "EMPTY" }
+  $summary.Add([pscustomobject]@{ league_id=$config.League; provider="ESPN"; status=$fetchStatus; fixtures=$fixtureCount; errors=0; error_code=$null; retryable=$false })
 }
 
 $fixtureRows = @($fixtures.ToArray())
 $signalRows = @($signals.ToArray())
 $errorRows = @($errors.ToArray())
+$summaryRows = @($summary.ToArray())
+$failedLeagues = @($summaryRows | Where-Object { $_.status -eq "ERROR" }).Count
+$successfulLeagues = @($summaryRows | Where-Object { $_.status -eq "SUCCESS" }).Count
+$emptyLeagues = @($summaryRows | Where-Object { $_.status -eq "EMPTY" }).Count
+$health = if ($summaryRows.Count -gt 0 -and $failedLeagues -eq $summaryRows.Count) { "FAILED" } elseif ($failedLeagues -gt 0) { "DEGRADED" } else { "HEALTHY" }
 
 $payload = [ordered]@{
   date = ([datetime]::Parse($Date)).ToString("yyyy-MM-dd")
   source = $Source
   fixtures = $fixtureRows
   signals = $signalRows
+  fetch_summary = $summaryRows
+  run_summary = [ordered]@{
+    health = $health
+    total_leagues = $summaryRows.Count
+    successful_leagues = $successfulLeagues
+    empty_leagues = $emptyLeagues
+    failed_leagues = $failedLeagues
+    fixtures = $fixtureRows.Count
+    providers_used = @("ESPN")
+  }
   meta = [ordered]@{
     generated_at = (Get-Date).ToUniversalTime().ToString("o")
     espn_date = $espnDate
@@ -229,6 +284,7 @@ $payload = [ordered]@{
 $payload | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $OutputPath -Encoding UTF8
 
 Write-Host "[espn-football-universe] date=$Date espn_date=$espnDate leagues=$($leagueConfigs.Count) fixtures=$($fixtures.Count) signals=$($signals.Count) include_odds=$IncludeOdds output=$OutputPath errors=$($errors.Count)"
+Write-Host "[espn-football-universe] health=$health success=$successfulLeagues empty=$emptyLeagues failed=$failedLeagues"
 if ($errors.Count -gt 0) {
   $errors | ConvertTo-Json -Depth 4
 }

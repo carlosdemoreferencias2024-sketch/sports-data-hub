@@ -88,6 +88,7 @@ $workerArgs = @(
   "--match-id", [string]$focus.match_id,
   "--expected-home", $expectedHome,
   "--expected-away", $expectedAway,
+  "--expected-kickoff", $kickoff.ToString("o"),
   "--league-slug", [string]$focus.league,
   "--api-key", $InternalApiKey,
   "--history-api-url", "$HubBaseUrl/api/v1/internal/analytics/ingest-historical-matches",

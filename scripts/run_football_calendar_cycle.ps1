@@ -43,6 +43,9 @@ function Invoke-IsolatedStep {
     if ($exitCode -eq 0) {
       return
     }
+    if ($output -match "NON_RETRYABLE:") {
+      break
+    }
     if ($attempt -lt $MaxAttempts) { Start-Sleep -Seconds (10 * $attempt) }
   }
 

@@ -213,7 +213,12 @@ def discover_event(
     league_slug: str | None = None,
     ambiguity_margin: int = 30,
     allow_post_kickoff: bool = False,
+    expected_kickoff: datetime | str | None = None,
+    kickoff_tolerance_minutes: int = 15,
 ) -> tuple[dict, dict, str]:
+    if kickoff_tolerance_minutes < 0:
+        raise ValueError("kickoff_tolerance_minutes must be non-negative")
+    expected_kickoff_at = parse_datetime(expected_kickoff) if expected_kickoff else None
     candidates_by_identity: dict[str, dict] = {}
     for provider_slug in league_provider_slugs(league_slug):
         url = scoreboard_url(provider_slug, date_key)
@@ -229,6 +234,12 @@ def discover_event(
             if home_score == 0 or away_score == 0:
                 continue
 
+            kickoff_delta_seconds = None
+            if expected_kickoff_at is not None:
+                kickoff_delta_seconds = abs((context["kickoff"] - expected_kickoff_at).total_seconds())
+                if kickoff_delta_seconds > kickoff_tolerance_minutes * 60:
+                    continue
+
             identity = context["event_id"] or "|".join((
                 provider_slug,
                 normalize_team(context["home"]["name"]),
@@ -240,14 +251,22 @@ def discover_event(
                 "event": event,
                 "payload": payload,
                 "url": url,
+                "kickoff_delta_seconds": kickoff_delta_seconds,
             }
             current = candidates_by_identity.get(identity)
             if current is None or candidate["score"] > current["score"]:
                 candidates_by_identity[identity] = candidate
 
-    candidates = sorted(candidates_by_identity.values(), key=lambda row: row["score"], reverse=True)
+    candidates = sorted(
+        candidates_by_identity.values(),
+        key=lambda row: (row["score"], -(row["kickoff_delta_seconds"] or 0)),
+        reverse=True,
+    )
     if not candidates:
         raise RuntimeError("ESPN_EVENT_NOT_FOUND")
+
+    if expected_kickoff_at is not None and len(candidates) > 1:
+        raise RuntimeError("ESPN_EVENT_IDENTITY_AMBIGUOUS")
 
     best = candidates[0]
     best_score = int(best["score"])
@@ -645,6 +664,12 @@ def main() -> int:
     parser.add_argument("--expected-home", required=True)
     parser.add_argument("--expected-away", required=True)
     parser.add_argument("--league-slug", default="")
+    parser.add_argument("--expected-kickoff", required=True)
+    parser.add_argument(
+        "--kickoff-tolerance-minutes",
+        type=int,
+        default=int(os.environ.get("ESPN_KICKOFF_TOLERANCE_MINUTES", "15")),
+    )
     parser.add_argument("--bookmaker", default="DraftKings")
     parser.add_argument("--snapshot-type", choices=["current", "closing"], default="current")
     parser.add_argument("--capture-market", action="store_true")
@@ -666,9 +691,15 @@ def main() -> int:
             args.expected_away,
             args.timeout,
             args.league_slug or None,
+            expected_kickoff=args.expected_kickoff,
+            kickoff_tolerance_minutes=args.kickoff_tolerance_minutes,
         )
     except RuntimeError as exc:
-        if str(exc) not in {"ESPN_EVENT_NOT_FOUND", "ESPN_EVENT_NOT_FOUND_OR_AMBIGUOUS"}:
+        if str(exc) not in {
+            "ESPN_EVENT_NOT_FOUND",
+            "ESPN_EVENT_NOT_FOUND_OR_AMBIGUOUS",
+            "ESPN_EVENT_IDENTITY_AMBIGUOUS",
+        }:
             raise
         print(json.dumps({
             "system_status": "ESPN_SOCCER_NO_MATCHING_EVENT",
@@ -676,6 +707,8 @@ def main() -> int:
             "league_slug": args.league_slug or None,
             "expected_home": args.expected_home,
             "expected_away": args.expected_away,
+            "expected_kickoff": args.expected_kickoff,
+            "kickoff_tolerance_minutes": args.kickoff_tolerance_minutes,
             "decision": "NO_PICK",
             "reason": str(exc),
             "history_applied": False,

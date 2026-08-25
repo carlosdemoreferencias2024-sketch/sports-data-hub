@@ -80,6 +80,65 @@ function toIso(date: Date): string {
   return date.toISOString();
 }
 
+function calendarProviderIdentity(rawData: Record<string, unknown> | undefined) {
+  const raw = rawData ?? {};
+  const apiFootballId = String(raw.api_football_fixture_id ?? "").trim();
+  if (apiFootballId) return { providerName: "api-football", providerEventId: apiFootballId };
+  const espnId = String(raw.espn_event_id ?? "").trim();
+  if (espnId) return { providerName: "espn-soccer", providerEventId: espnId };
+  return null;
+}
+
+async function registerCalendarTrust(
+  db: Queryable,
+  input: { matchId: string; kickoffUtc: string; providerName: string; providerEventId: string }
+) {
+  await db.query("SELECT * FROM register_forecast_match($1::uuid)", [input.matchId]);
+
+  const identity = await db.query(
+    `
+      SELECT 1
+      FROM forecast_provider_match_mappings mapping
+      JOIN LATERAL (
+        SELECT result
+        FROM forecast_slate_validations
+        WHERE match_id = mapping.match_id AND validation_type = 'identity'
+        ORDER BY validated_at DESC, id DESC
+        LIMIT 1
+      ) validation ON validation.result = 'VALID'
+      WHERE mapping.match_id = $1::uuid
+        AND mapping.provider_name = $2
+        AND mapping.external_match_id = $3
+      LIMIT 1
+    `,
+    [input.matchId, input.providerName, input.providerEventId]
+  );
+  if (identity.rows.length === 0) {
+    await db.query(
+      "SELECT * FROM register_forecast_provider_mapping($1::uuid, $2, $3, NULL::uuid, $4)",
+      [input.matchId, input.providerName, input.providerEventId, "football_calendar_provider"]
+    );
+  }
+
+  const schedule = await db.query(
+    `
+      SELECT result
+      FROM forecast_slate_validations
+      WHERE match_id = $1::uuid
+        AND validation_type = 'schedule'
+      ORDER BY validated_at DESC, id DESC
+      LIMIT 1
+    `,
+    [input.matchId]
+  );
+  if (String(schedule.rows[0]?.result || "") !== "VALID") {
+    await db.query(
+      "SELECT * FROM validate_forecast_schedule($1::uuid, false, false, $2::timestamptz, NULL::uuid, $3)",
+      [input.matchId, input.kickoffUtc, "football_calendar_provider"]
+    );
+  }
+}
+
 function localDateWindow(date?: string) {
   return tradingLocalDateWindow(date);
 }
@@ -411,6 +470,7 @@ export async function processFootballTodayUniverse(db: Queryable, payload: unkno
     no_bet: 0,
     rejected: 0,
     duplicates: 0,
+    calendar_trusted: 0,
     blocked: 0,
     errors: 0
   };
@@ -452,9 +512,31 @@ export async function processFootballTodayUniverse(db: Queryable, payload: unkno
     if (dryRun) summary.fixtures_would_insert += 1;
     else if (saved.inserted) summary.fixtures_inserted += 1;
     else summary.duplicates += 1;
+    const providerIdentity = calendarProviderIdentity(fixture.raw_data);
+    if (providerIdentity) {
+      if (!dryRun) {
+        await registerCalendarTrust(db, {
+          matchId: saved.matchId,
+          kickoffUtc: saved.kickoffUtc,
+          ...providerIdentity
+        });
+      }
+      summary.calendar_trusted += 1;
+    }
     summary.observation_only += 1;
     addCount(byLeague, saved.leagueId, { league_id: saved.leagueId, observation_only: 1 });
-    rows.push({ type: "fixture", status: dryRun ? "DRY_RUN_WOULD_OBSERVE" : "OBSERVATION_ONLY", league_id: saved.leagueId, match_id: saved.matchId, generated_match_id: saved.generated, match: `${fixture.home_team} vs ${fixture.away_team}`, observation_only_league: league.observation_only });
+    rows.push({
+      type: "fixture",
+      status: dryRun ? "DRY_RUN_WOULD_OBSERVE" : "OBSERVATION_ONLY",
+      league_id: saved.leagueId,
+      match_id: saved.matchId,
+      generated_match_id: saved.generated,
+      match: `${fixture.home_team} vs ${fixture.away_team}`,
+      observation_only_league: league.observation_only,
+      calendar_trusted: Boolean(providerIdentity),
+      calendar_provider: providerIdentity?.providerName ?? null,
+      provider_event_id: providerIdentity?.providerEventId ?? null
+    });
   }
 
   for (const signal of body.signals) {

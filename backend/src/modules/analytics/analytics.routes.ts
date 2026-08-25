@@ -59,6 +59,7 @@ import { getMlbFixtureTimeRepairStatus, runMlbFixtureTimeRepair } from "../../tr
 import { getOperationalWindowQueue } from "../../trading/operational-window-orchestrator.js";
 import { getOperationalAlerts } from "../../trading/operational-alerts.js";
 import { getCleanSampleQueue } from "../../trading/clean-sample-queue.js";
+import { loadCalendarTrustDecisions } from "../../trading/calendar-trust-gate.js";
 import { getOddsSnapshotCache, recordManualOddsSnapshot } from "../../trading/odds-snapshot-cache.js";
 import { getShadowTicketChain } from "../../trading/shadow-ticket-chain.js";
 import {
@@ -8989,18 +8990,32 @@ export async function analyticsRoutes(app: FastifyInstance) {
       };
     };
 
-    const candidates = rows
+    const soccerRows = rows
       .filter((row) => row.sport === "soccer" && row.match_id)
       .filter((row) => !query.match_id || String(row.match_id) === query.match_id)
       .filter((row) => isPlayableStatus(row))
-      .filter((row) => query.include_post_kickoff || !isPostKickoff(row.kickoff))
+      .filter((row) => query.include_post_kickoff || !isPostKickoff(row.kickoff));
+    const trustByMatchId = await loadCalendarTrustDecisions(
+      db,
+      soccerRows.map((row) => String(row.match_id))
+    );
+    const calendarBlockedRows = soccerRows.filter((row) => !trustByMatchId.get(String(row.match_id))?.trusted);
+    const candidates = soccerRows
+      .filter((row) => trustByMatchId.get(String(row.match_id))?.trusted)
       .slice(0, query.limit);
 
     let inserted = 0;
     let updated = 0;
     let modelVersionsRegistered = 0;
     const outputRows: Array<Record<string, any>> = [];
-    const skippedRows: Array<Record<string, any>> = [];
+    const skippedRows: Array<Record<string, any>> = calendarBlockedRows.map((row) => ({
+      match_id: row.match_id,
+      match: row.match,
+      kickoff: row.kickoff,
+      status: "CALENDAR_TRUST_REQUIRED",
+      reason: "VERIFY_CALENDAR",
+      blockers: trustByMatchId.get(String(row.match_id))?.reasons ?? ["CALENDAR_TRUST_MISSING"]
+    }));
 
     for (const row of candidates) {
       let differentiatedModel: ReturnType<typeof computeFootballFairOdds> | ReturnType<typeof computeFootballFairOddsV3>;
@@ -9275,7 +9290,8 @@ export async function analyticsRoutes(app: FastifyInstance) {
       apply_requested: query.apply,
       model_name: modelName,
       scanned_matches: rows.length,
-      priced_matches: candidates.length - skippedRows.length,
+      priced_matches: new Set(outputRows.map((row) => String(row.match_id))).size,
+      calendar_trust_blocked: calendarBlockedRows.length,
       quotes_generated: outputRows.length,
       inserted,
       updated,
@@ -10282,4 +10298,3 @@ export async function analyticsRoutes(app: FastifyInstance) {
     };
   });
 }
-

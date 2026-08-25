@@ -96,6 +96,65 @@ class EspnSoccerScraperContractTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "ESPN_EVENT_NOT_FOUND_OR_AMBIGUOUS"):
             discover_event("20260824", "AS Roma", "Fiorentina", 10, league_slug="serie-a")
 
+    @patch("espn_soccer_scraper.fetch_json")
+    def test_discovery_uses_expected_kickoff_to_select_single_event(self, fetch_json):
+        events = []
+        for event_id, kickoff in (
+            ("401999001", "2026-08-24T20:00:00Z"),
+            ("401999002", "2026-08-24T21:00:00Z"),
+        ):
+            event = copy.deepcopy(self.event)
+            event["id"] = event_id
+            event["date"] = kickoff
+            event["competitions"][0]["date"] = kickoff
+            event["competitions"][0]["competitors"] = [
+                {"homeAway": "home", "team": {"id": "1", "displayName": "Roma", "abbreviation": "ROM"}},
+                {"homeAway": "away", "team": {"id": "2", "displayName": "Fiorentina", "abbreviation": "FIO"}},
+            ]
+            events.append(event)
+        fetch_json.return_value = {"events": events}
+
+        selected, _, _ = discover_event(
+            "20260824",
+            "AS Roma",
+            "Fiorentina",
+            10,
+            league_slug="serie-a",
+            expected_kickoff="2026-08-24T20:00:00Z",
+            kickoff_tolerance_minutes=15,
+        )
+
+        self.assertEqual(selected["id"], "401999001")
+
+    @patch("espn_soccer_scraper.fetch_json")
+    def test_discovery_fails_closed_when_two_events_are_inside_kickoff_tolerance(self, fetch_json):
+        events = []
+        for event_id, kickoff in (
+            ("401999001", "2026-08-24T19:55:00Z"),
+            ("401999002", "2026-08-24T20:05:00Z"),
+        ):
+            event = copy.deepcopy(self.event)
+            event["id"] = event_id
+            event["date"] = kickoff
+            event["competitions"][0]["date"] = kickoff
+            event["competitions"][0]["competitors"] = [
+                {"homeAway": "home", "team": {"id": "1", "displayName": "Roma", "abbreviation": "ROM"}},
+                {"homeAway": "away", "team": {"id": "2", "displayName": "Fiorentina", "abbreviation": "FIO"}},
+            ]
+            events.append(event)
+        fetch_json.return_value = {"events": events}
+
+        with self.assertRaisesRegex(RuntimeError, "ESPN_EVENT_IDENTITY_AMBIGUOUS"):
+            discover_event(
+                "20260824",
+                "AS Roma",
+                "Fiorentina",
+                10,
+                league_slug="serie-a",
+                expected_kickoff="2026-08-24T20:00:00Z",
+                kickoff_tolerance_minutes=15,
+            )
+
     def test_market_requires_complete_three_way_prices(self):
         market = moneyline_market(self.event, "DraftKings")
         self.assertEqual(market["home_american"], -175)
