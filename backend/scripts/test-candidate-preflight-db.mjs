@@ -140,6 +140,77 @@ try {
   const verified = await client.query("SELECT verify_candidate_snapshot($1::uuid) AS valid", [before.rows[0].id]);
   assert.equal(verified.rows[0].valid, true);
 
+  const sourceFixture = await client.query(`
+    SELECT
+      m.league_id,
+      m.season_id,
+      m.venue_id,
+      home.team_id AS home_team_id,
+      away.team_id AS away_team_id
+    FROM matches m
+    JOIN match_competitors home
+      ON home.match_id = m.id AND home.home_away = 'home'
+    JOIN match_competitors away
+      ON away.match_id = m.id AND away.home_away = 'away'
+    WHERE m.id = $1
+  `, [matchId]);
+  assert.ok(sourceFixture.rows[0]);
+  const noEvidenceMatchId = randomUUID();
+  await client.query(`
+    INSERT INTO matches (
+      id, league_id, season_id, venue_id, slug, match_date, status, raw_data
+    ) VALUES (
+      $1, $2, $3, $4, $5, $6::timestamptz, 'scheduled',
+      jsonb_build_object('test_fixture', true, 'candidate_preflight_no_evidence', true)
+    )
+  `, [
+    noEvidenceMatchId,
+    sourceFixture.rows[0].league_id,
+    sourceFixture.rows[0].season_id,
+    sourceFixture.rows[0].venue_id,
+    `candidate-preflight-no-evidence-${noEvidenceMatchId}`,
+    kickoff.toISOString()
+  ]);
+  await client.query(`
+    INSERT INTO match_competitors (match_id, team_id, home_away)
+    VALUES ($1, $2, 'home'), ($1, $3, 'away')
+  `, [noEvidenceMatchId, sourceFixture.rows[0].home_team_id, sourceFixture.rows[0].away_team_id]);
+  await client.query("SELECT * FROM register_forecast_match($1::uuid)", [noEvidenceMatchId]);
+  await client.query(
+    "SELECT * FROM validate_forecast_schedule($1::uuid, false, false, $2::timestamptz, NULL, $3)",
+    [noEvidenceMatchId, kickoff.toISOString(), "candidate-db-test"]
+  );
+  await client.query(
+    "SELECT * FROM register_forecast_provider_mapping($1::uuid, $2, $3, NULL, $4)",
+    [noEvidenceMatchId, `test-no-evidence-${token}`, randomUUID(), "candidate-db-test"]
+  );
+  const noEvidenceQuote = await client.query(`
+    INSERT INTO model_quotes (
+      match_id, model_name, market_type, home_probability, away_probability,
+      draw_probability, home_fair_odds, away_fair_odds, draw_fair_odds,
+      confidence, generated_at, raw_data
+    ) VALUES (
+      $1, 'sports_data_hub_football_fair_odds_v3', 'moneyline_2way',
+      0.55, 0.45, NULL, 1.8182, 2.2222, NULL, 0.70,
+      clock_timestamp(), jsonb_build_object(
+        'owned_fair_odds', true,
+        'market_inputs_used', false,
+        'immutable_candidate_input', true,
+        'model_version_id', $2::text
+      )
+    ) RETURNING id
+  `, [noEvidenceMatchId, version.rows[0].id]);
+  const noEvidence = await client.query(
+    "SELECT * FROM candidate_preflight($1::uuid, $2::timestamptz)",
+    [noEvidenceMatchId, new Date(Date.now() + 3000).toISOString()]
+  );
+  assert.equal(noEvidence.rows[0].verdict, "FAIL");
+  assert.ok(noEvidence.rows[0].reasons_json.includes("ENTRY_EVIDENCE_MISSING_AS_OF"));
+  assert.ok(noEvidence.rows[0].reasons_json.includes("COMPLETE_CONTEXT_MISSING_AS_OF"));
+  assert.ok(!noEvidence.rows[0].reasons_json.includes("FAIR_ODDS_MISSING_AS_OF"));
+  assert.ok(!noEvidence.rows[0].reasons_json.includes("MODEL_MARKET_MISMATCH"));
+  assert.equal(noEvidence.rows[0].model_quote_id, noEvidenceQuote.rows[0].id);
+
   await client.query(`
     INSERT INTO forecast_slate_validations (
       match_id, validation_type, result, details_json, verified_by, validated_at

@@ -11,12 +11,7 @@ const db = {
     if (sql.includes("candidate_preflight(")) {
       return { rows: [{ id: "snapshot-1", match_id: matchId, verdict: "PASS", decision_as_of: decisionAsOf }] };
     }
-    return {
-      rows: [
-        { id: "snapshot-1", match_id: matchId, verdict: "PASS", hash_valid: true },
-        { id: "snapshot-2", match_id: matchId, verdict: "FAIL", hash_valid: true }
-      ]
-    };
+    return { rows: [{ id: "snapshot-1", match_id: matchId, verdict: "PASS", hash_valid: true }] };
   }
 };
 
@@ -30,9 +25,12 @@ assert.deepEqual(calls[0].values, [matchId, decisionAsOf]);
 
 const status = await getCandidatePreflightStatus(db, { match_id: matchId, date: "2026-08-13", sport: "football" });
 assert.equal(status.passed, 1);
-assert.equal(status.failed, 1);
+assert.equal(status.failed, 0);
+assert.equal(status.scanned, 1);
 assert.equal(status.sport, "soccer");
 assert.equal(status.guardrails.kill_switch, true);
+assert.match(calls[1].sql, /DISTINCT ON \(snapshot\.match_id\)/);
+assert.match(calls[1].sql, /snapshot\.decision_as_of DESC/);
 
 await assert.rejects(() => runCandidatePreflight(db, {}), /match_id_required/);
 assert.equal(shadowCandidatePreflightPassed(undefined), false);

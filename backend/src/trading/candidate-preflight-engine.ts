@@ -56,21 +56,29 @@ export async function getCandidatePreflightStatus(db: Queryable, input: Candidat
   const limit = Math.max(1, Math.min(300, Number(input.limit || 120)));
   const result = await db.query(
     `
-      SELECT
-        snapshot.*,
-        match.sport_slug AS sport,
-        match.league_slug AS league,
-        match.home_team,
-        match.away_team,
-        match.scheduled_start AS kickoff,
-        verify_candidate_snapshot(snapshot.id) AS hash_valid
-      FROM forecast_candidate_snapshots snapshot
-      JOIN forecast_matches match ON match.match_id = snapshot.match_id
-      WHERE match.scheduled_start >= $1::timestamptz
-        AND match.scheduled_start < $2::timestamptz
-        AND ($3::text = 'all' OR match.sport_slug = $3::text)
-        AND ($4::uuid IS NULL OR snapshot.match_id = $4::uuid)
-      ORDER BY match.scheduled_start, snapshot.created_at DESC
+      SELECT latest.*
+      FROM (
+        SELECT DISTINCT ON (snapshot.match_id)
+          snapshot.*,
+          match.sport_slug AS sport,
+          match.league_slug AS league,
+          match.home_team,
+          match.away_team,
+          match.scheduled_start AS kickoff,
+          verify_candidate_snapshot(snapshot.id) AS hash_valid
+        FROM forecast_candidate_snapshots snapshot
+        JOIN forecast_matches match ON match.match_id = snapshot.match_id
+        WHERE match.scheduled_start >= $1::timestamptz
+          AND match.scheduled_start < $2::timestamptz
+          AND ($3::text = 'all' OR match.sport_slug = $3::text)
+          AND ($4::uuid IS NULL OR snapshot.match_id = $4::uuid)
+        ORDER BY
+          snapshot.match_id,
+          snapshot.decision_as_of DESC,
+          snapshot.created_at DESC,
+          snapshot.id DESC
+      ) latest
+      ORDER BY latest.kickoff, latest.created_at DESC
       LIMIT $5
     `,
     [window.start, window.end, sport, input.match_id || null, limit]
