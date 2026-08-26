@@ -81,6 +81,7 @@ $expectedHome = $matchParts[1].Trim()
 $worker = Join-Path $RuntimeRoot "espn_soccer_scraper.py"
 if (-not (Test-Path -LiteralPath $worker)) { $worker = Join-Path $repoRoot "workers\espn_soccer_scraper.py" }
 if (-not (Test-Path -LiteralPath $worker)) { throw "Football scraper not found: $worker" }
+$providerLeagueSlug = if ([string]$focus.league -eq "football-observed-nwsl") { "nwsl" } else { [string]$focus.league }
 
 $workerArgs = @(
   $worker,
@@ -89,7 +90,7 @@ $workerArgs = @(
   "--expected-home", $expectedHome,
   "--expected-away", $expectedAway,
   "--expected-kickoff", $kickoff.ToString("o"),
-  "--league-slug", [string]$focus.league,
+  "--league-slug", $providerLeagueSlug,
   "--api-key", $InternalApiKey,
   "--history-api-url", "$HubBaseUrl/api/v1/internal/analytics/ingest-historical-matches",
   "--output-root", (Join-Path $repoRoot "uploads\source-captures\scraper-inbox"),

@@ -36,6 +36,7 @@ const ALLOWED_CAPTURE_TYPES = new Set([
   "current_odds",
   "lineup",
   "goalkeeper",
+  "near_start_context",
   "result",
   "match_status",
   "official_inactives",
@@ -151,6 +152,7 @@ function suggestedSource(captureType: string, sport: string) {
   if (sport === "american_football" && ["starting_quarterbacks", "result", "match_status"].includes(captureType)) return "nfl_official_manual_verified";
   if (captureType === "result" || captureType === "match_status") return "official_league_manual_verified";
   if (captureType === "lineup" || captureType === "goalkeeper") return "official_club_manual_verified";
+  if (captureType === "near_start_context") return "official_league_manual_verified";
   return "official_league_manual_verified";
 }
 
@@ -200,10 +202,24 @@ function baseDraft(input: {
       result_status: input.capture_type === "result" ? data.result_status || "FINAL" : undefined,
       home_score: input.capture_type === "result" ? data.home_score ?? "REPLACE_WITH_HOME_SCORE" : undefined,
       away_score: input.capture_type === "result" ? data.away_score ?? "REPLACE_WITH_AWAY_SCORE" : undefined,
-      home_lineup: input.capture_type === "lineup" ? data.home_lineup || [] : undefined,
-      away_lineup: input.capture_type === "lineup" ? data.away_lineup || [] : undefined,
-      goalkeeper_home: input.capture_type === "goalkeeper" ? data.goalkeeper_home || "REPLACE_WITH_HOME_GK" : undefined,
-      goalkeeper_away: input.capture_type === "goalkeeper" ? data.goalkeeper_away || "REPLACE_WITH_AWAY_GK" : undefined,
+      home_lineup: input.capture_type === "near_start_context" ? data.home_lineup || [] : (input.capture_type === "lineup" ? data.home_lineup || [] : undefined),
+      away_lineup: input.capture_type === "near_start_context" ? data.away_lineup || [] : (input.capture_type === "lineup" ? data.away_lineup || [] : undefined),
+      formation_home: input.capture_type === "near_start_context" ? data.formation_home || null : undefined,
+      formation_away: input.capture_type === "near_start_context" ? data.formation_away || null : undefined,
+      goalkeeper_home: input.capture_type === "near_start_context" ? data.goalkeeper_home || null : (input.capture_type === "goalkeeper" ? data.goalkeeper_home || "REPLACE_WITH_HOME_GK" : undefined),
+      goalkeeper_away: input.capture_type === "near_start_context" ? data.goalkeeper_away || null : (input.capture_type === "goalkeeper" ? data.goalkeeper_away || "REPLACE_WITH_AWAY_GK" : undefined),
+      lineup_status: input.capture_type === "near_start_context" ? data.lineup_status || "UNKNOWN" : undefined,
+      goalkeeper_status: input.capture_type === "near_start_context" ? data.goalkeeper_status || "UNKNOWN" : undefined,
+      availability_status: input.capture_type === "near_start_context" ? data.availability_status || "SOURCE_NOT_PROVIDED" : undefined,
+      player_availability_manual_verified: input.capture_type === "near_start_context" ? data.player_availability_manual_verified === true : undefined,
+      unavailable_players: input.capture_type === "near_start_context" ? data.unavailable_players || [] : undefined,
+      injuries: input.capture_type === "near_start_context" ? data.injuries || [] : undefined,
+      suspensions: input.capture_type === "near_start_context" ? data.suspensions || [] : undefined,
+      availability_details: input.capture_type === "near_start_context" ? data.availability_details || [] : undefined,
+      availability_provider: input.capture_type === "near_start_context" ? data.availability_provider || null : undefined,
+      availability_provider_raw_sha256: input.capture_type === "near_start_context" ? data.availability_provider_raw_sha256 || null : undefined,
+      availability_source_url: input.capture_type === "near_start_context" ? data.availability_source_url || null : undefined,
+      normalized_event: input.capture_type === "near_start_context" ? data.normalized_event || null : data.normalized_event || undefined,
       official_inactives: input.capture_type === "official_inactives" ? data.official_inactives || [] : undefined,
       official_inactives_confirmed: input.capture_type === "official_inactives" ? data.official_inactives_confirmed ?? true : undefined,
       starting_quarterback_home: input.capture_type === "starting_quarterbacks" ? data.starting_quarterback_home || "REPLACE_WITH_HOME_QB" : undefined,

@@ -20,6 +20,7 @@ import { quoteRoutes } from "./modules/quotes/quote.routes.js";
 import { apiKeyHook } from "./shared/api-key.js";
 import { AppError } from "./shared/http-errors.js";
 import { analyticsRoutes } from "./modules/analytics/analytics.routes.js";
+import { footballNearStartCaptureRoutes } from "./modules/analytics/football-near-start-capture.routes.js";
 
 export function buildApp() {
   const app = Fastify({ logger: true });
@@ -102,6 +103,7 @@ export function buildApp() {
 
   app.register(catalogRoutes);
   app.register(analyticsRoutes);
+  app.register(footballNearStartCaptureRoutes);
   app.register(dashboardRoutes);
   app.register(matchRoutes);
   app.register(mappingRoutes);

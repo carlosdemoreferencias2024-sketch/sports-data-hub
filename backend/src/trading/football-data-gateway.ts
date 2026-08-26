@@ -7,6 +7,7 @@ const DEFAULT_BASE_URL = "https://v3.football.api-sports.io";
 const DEFAULT_DAILY_LIMIT = 100;
 const DEFAULT_RATE_LIMIT_PER_MINUTE = 10;
 const DEFAULT_CACHE_HOURS = 6;
+const DEFAULT_NEAR_START_RESERVE = 20;
 
 const API_FOOTBALL_LEAGUE_IDS: Record<string, number> = {
   "liga-mx": 262,
@@ -95,6 +96,12 @@ const manualContextSchema = z.object({
   })).min(1).max(20)
 });
 
+const officialNearStartSchema = z.object({
+  match_id: z.string().uuid(),
+  dry_run: z.boolean().optional().default(false),
+  max_cache_age_minutes: z.number().int().min(1).max(30).optional().default(5)
+});
+
 type ManualContextInput = z.infer<typeof manualContextSchema>;
 
 function toInt(value: string | undefined, fallback: number) {
@@ -104,6 +111,21 @@ function toInt(value: string | undefined, fallback: number) {
 
 function hashPayload(value: unknown) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function canonicalHash(value: unknown) {
+  return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
 
 function cacheKey(endpoint: string, params: Record<string, unknown>) {
@@ -301,6 +323,10 @@ async function ensureGatewayTables(db: Queryable) {
 async function usageStatus(db: Queryable) {
   const dailyLimit = toInt(process.env.API_FOOTBALL_DAILY_LIMIT, DEFAULT_DAILY_LIMIT);
   const rateLimitPerMinute = toInt(process.env.API_FOOTBALL_RATE_LIMIT_PER_MINUTE, DEFAULT_RATE_LIMIT_PER_MINUTE);
+  const nearStartReserve = Math.min(
+    dailyLimit,
+    toInt(process.env.API_FOOTBALL_NEAR_START_RESERVE, DEFAULT_NEAR_START_RESERVE)
+  );
   const used = await db.query(
     `SELECT COALESCE(SUM(requests_used), 0)::int AS requests_used_today FROM api_provider_usage WHERE provider = $1 AND date_utc = (now() AT TIME ZONE 'UTC')::date`,
     [PROVIDER]
@@ -313,36 +339,60 @@ async function usageStatus(db: Queryable) {
     requests_used_today: requestsUsedToday,
     requests_limit: dailyLimit,
     quota_remaining_estimate: Math.max(0, dailyLimit - requestsUsedToday),
+    near_start_reserve: nearStartReserve,
+    general_context_quota_remaining: Math.max(0, dailyLimit - requestsUsedToday - nearStartReserve),
     rate_limit_per_minute: rateLimitPerMinute
   };
 }
 
-async function cacheLookup(db: Queryable, endpoint: string, params: Record<string, unknown>): Promise<{ response_json: unknown; source_confidence_score: unknown; expires_at: unknown; cache_key: string } | null> {
+async function cacheLookup(
+  db: Queryable,
+  endpoint: string,
+  params: Record<string, unknown>,
+  maxAgeMinutes?: number
+): Promise<{ response_json: unknown; source_confidence_score: unknown; expires_at: unknown; cache_key: string } | null> {
   const key = cacheKey(endpoint, params);
   const result = await db.query(
-    `SELECT response_json, source_confidence_score, expires_at FROM api_response_cache WHERE provider = $1 AND cache_key = $2 AND expires_at > now() ORDER BY updated_at DESC LIMIT 1`,
-    [PROVIDER, key]
+    `
+      SELECT response_json, source_confidence_score, expires_at
+      FROM api_response_cache
+      WHERE provider = $1
+        AND cache_key = $2
+        AND expires_at > now()
+        AND ($3::integer IS NULL OR updated_at >= now() - ($3::text || ' minutes')::interval)
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `,
+    [PROVIDER, key, maxAgeMinutes ?? null]
   );
   const row = result.rows[0] as Record<string, unknown> | undefined;
   if (!row || apiFootballPayloadHasErrors(row.response_json)) return null;
   return { response_json: row.response_json, source_confidence_score: row.source_confidence_score, expires_at: row.expires_at, cache_key: key };
 }
 
-async function cacheStore(db: Queryable, endpoint: string, params: Record<string, unknown>, response: unknown, confidence = 0.8) {
+async function cacheStore(
+  db: Queryable,
+  endpoint: string,
+  params: Record<string, unknown>,
+  response: unknown,
+  confidence = 0.8,
+  ttlMinutes?: number
+) {
   const key = cacheKey(endpoint, params);
   const paramsHash = hashPayload(params);
   const cacheHours = toInt(process.env.API_FOOTBALL_CACHE_HOURS, DEFAULT_CACHE_HOURS);
+  const expiresAt = new Date(Date.now() + (ttlMinutes ? ttlMinutes * 60_000 : cacheHours * 3_600_000)).toISOString();
   await db.query(
     `
       INSERT INTO api_response_cache (provider, endpoint, params_hash, cache_key, response_json, source_confidence_score, expires_at)
-      VALUES ($1, $2, $3, $4, $5::jsonb, $6, now() + ($7::text || ' hours')::interval)
+      VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::timestamptz)
       ON CONFLICT (provider, cache_key) DO UPDATE SET
         response_json = EXCLUDED.response_json,
         source_confidence_score = EXCLUDED.source_confidence_score,
         expires_at = EXCLUDED.expires_at,
         updated_at = now()
     `,
-    [PROVIDER, endpoint, paramsHash, key, JSON.stringify(response), confidence, cacheHours]
+    [PROVIDER, endpoint, paramsHash, key, JSON.stringify(response), confidence, expiresAt]
   );
 }
 
@@ -568,6 +618,281 @@ async function applyHydration(db: Queryable, target: GatewayTarget, responses: R
   return { consensus_verified: verified, consensus_score: consensusScore, team_status: teamStatus, player_status: hasLineups ? "PLAYER_CONTEXT_SUPPORTS" : "LINEUP_PENDING" };
 }
 
+function responseRows(payload: unknown) {
+  const response = rawObject(payload).response;
+  return Array.isArray(response) ? response : [];
+}
+
+function usableOfficialPayload(payload: unknown) {
+  return Boolean(payload && typeof payload === "object" && Array.isArray(rawObject(payload).response) && !apiFootballPayloadHasErrors(payload));
+}
+
+function uniqueStrings(values: unknown[]) {
+  return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
+function lineupSide(rows: any[], teamName: string) {
+  const side = rows.find((row) => namesLikelyMatch(row?.team?.name, teamName));
+  const starters = Array.isArray(side?.startXI) ? side.startXI : [];
+  const normalizedStarters = starters
+    .map((row: any) => ({
+      id: firstString(row?.player?.id),
+      name: firstString(row?.player?.name),
+      number: row?.player?.number ?? null,
+      position: firstString(row?.player?.pos),
+      grid: firstString(row?.player?.grid)
+    }))
+    .filter((row: Record<string, unknown>) => Boolean(row.name));
+  const goalkeeper = normalizedStarters.find((row: Record<string, unknown>) => {
+    const position = String(row.position || "").trim().toLowerCase();
+    return position === "g" || position === "gk" || position === "goalkeeper";
+  });
+  return {
+    team_id: firstString(side?.team?.id),
+    team_name: firstString(side?.team?.name),
+    formation: firstString(side?.formation),
+    starters: normalizedStarters,
+    goalkeeper: goalkeeper?.name ? String(goalkeeper.name) : null,
+    confirmed: normalizedStarters.length === 11
+  };
+}
+
+export function normalizeApiFootballNearStartPayloads(input: {
+  homeTeam: string;
+  awayTeam: string;
+  lineupsPayload: unknown;
+  injuriesPayload: unknown;
+}) {
+  const lineupsUsable = usableOfficialPayload(input.lineupsPayload);
+  const availabilityUsable = usableOfficialPayload(input.injuriesPayload);
+  const lineupRows = responseRows(input.lineupsPayload);
+  const home = lineupSide(lineupRows, input.homeTeam);
+  const away = lineupSide(lineupRows, input.awayTeam);
+  const identityMatches = Boolean(
+    home.team_name && away.team_name &&
+    namesLikelyMatch(home.team_name, input.homeTeam) &&
+    namesLikelyMatch(away.team_name, input.awayTeam)
+  );
+  const lineupConfirmed = lineupsUsable && identityMatches && home.confirmed && away.confirmed;
+  const goalkeeperConfirmed = lineupConfirmed && Boolean(home.goalkeeper && away.goalkeeper);
+
+  const availabilityDetails = responseRows(input.injuriesPayload)
+    .map((row: any) => {
+      const playerName = firstString(row?.player?.name);
+      const type = firstString(row?.player?.type);
+      const reason = firstString(row?.player?.reason);
+      const teamName = firstString(row?.team?.name);
+      if (!playerName) return null;
+      const joined = `${type || ""} ${reason || ""}`.toLowerCase();
+      const category = /suspend|red card|yellow card ban|disciplin/.test(joined) ? "suspension" : "injury";
+      const side = namesLikelyMatch(teamName, input.homeTeam)
+        ? "home"
+        : namesLikelyMatch(teamName, input.awayTeam) ? "away" : "unknown";
+      return {
+        player_id: firstString(row?.player?.id),
+        player_name: playerName,
+        team_id: firstString(row?.team?.id),
+        team_name: teamName,
+        side,
+        category,
+        type,
+        reason
+      };
+    })
+    .filter(Boolean) as Array<Record<string, unknown>>;
+  const injuries = uniqueStrings(availabilityDetails.filter((row) => row.category === "injury").map((row) => row.player_name));
+  const suspensions = uniqueStrings(availabilityDetails.filter((row) => row.category === "suspension").map((row) => row.player_name));
+
+  return {
+    lineup_status: lineupConfirmed ? "CONFIRMED" : (lineupsUsable && lineupRows.length > 0 ? "PENDING" : "UNKNOWN"),
+    goalkeeper_status: goalkeeperConfirmed ? "CONFIRMED" : (lineupsUsable && lineupRows.length > 0 ? "PENDING" : "UNKNOWN"),
+    availability_status: availabilityUsable ? "CONFIRMED" : "SOURCE_UNAVAILABLE",
+    home_lineup: home.starters.map((row: Record<string, unknown>) => String(row.name)),
+    away_lineup: away.starters.map((row: Record<string, unknown>) => String(row.name)),
+    formation_home: home.formation,
+    formation_away: away.formation,
+    goalkeeper_home: home.goalkeeper,
+    goalkeeper_away: away.goalkeeper,
+    unavailable_players: uniqueStrings([...injuries, ...suspensions]),
+    injuries,
+    suspensions,
+    availability_details: availabilityDetails,
+    source_integrity: {
+      lineups_payload_valid: lineupsUsable,
+      availability_payload_valid: availabilityUsable,
+      lineup_team_identity_match: identityMatches,
+      empty_availability_report_is_valid: availabilityUsable && availabilityDetails.length === 0
+    }
+  };
+}
+
+async function officialNearStartTarget(db: Queryable, matchId: string) {
+  const result = await db.query(
+    `
+      SELECT
+        m.id::text AS match_id,
+        m.match_date::text AS kickoff,
+        l.slug AS league_slug,
+        home_team.name AS home_team,
+        away_team.name AS away_team,
+        mapping.provider_name,
+        mapping.external_match_id AS fixture_id,
+        schedule_validation.result AS schedule_validation,
+        identity_validation.result AS identity_validation,
+        EXTRACT(EPOCH FROM (m.match_date - now())) / 60.0 AS minutes_until_start
+      FROM v_valid_matches m
+      JOIN leagues l ON l.id = m.league_id
+      JOIN sports s ON s.id = l.sport_id
+      LEFT JOIN match_competitors home_mc ON home_mc.match_id = m.id AND home_mc.home_away = 'home'
+      LEFT JOIN teams home_team ON home_team.id = home_mc.team_id
+      LEFT JOIN match_competitors away_mc ON away_mc.match_id = m.id AND away_mc.home_away = 'away'
+      LEFT JOIN teams away_team ON away_team.id = away_mc.team_id
+      LEFT JOIN LATERAL (
+        SELECT provider_name, external_match_id
+        FROM forecast_provider_match_mappings
+        WHERE match_id = m.id
+          AND LOWER(REPLACE(provider_name, '_', '-')) LIKE '%api-football%'
+        ORDER BY verified_at DESC, id DESC
+        LIMIT 1
+      ) mapping ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT result
+        FROM forecast_slate_validations
+        WHERE match_id = m.id AND validation_type = 'schedule'
+        ORDER BY validated_at DESC, id DESC
+        LIMIT 1
+      ) schedule_validation ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT result
+        FROM forecast_slate_validations
+        WHERE match_id = m.id AND validation_type = 'identity'
+        ORDER BY validated_at DESC, id DESC
+        LIMIT 1
+      ) identity_validation ON TRUE
+      WHERE m.id = $1::uuid AND s.slug = 'soccer'
+      LIMIT 1
+    `,
+    [matchId]
+  );
+  return result.rows[0] || null;
+}
+
+export async function captureFootballOfficialNearStartContext(db: Queryable, body: unknown) {
+  await ensureGatewayTables(db);
+  const input = officialNearStartSchema.parse(body ?? {});
+  const target = await officialNearStartTarget(db, input.match_id);
+  if (!target) throw new Error("football_near_start_match_not_found");
+  if (!target.fixture_id) throw new Error("api_football_fixture_mapping_required");
+  if (String(target.schedule_validation) !== "VALID") throw new Error("football_schedule_validation_required");
+  if (String(target.identity_validation) !== "VALID") throw new Error("football_identity_validation_required");
+  const minutesUntilStart = Number(target.minutes_until_start);
+  if (!Number.isFinite(minutesUntilStart) || minutesUntilStart <= 0) throw new Error("post_kickoff_capture_rejected");
+  if (minutesUntilStart < 5 || minutesUntilStart > 90) throw new Error("football_near_start_window_inactive");
+
+  const usage = await usageStatus(db);
+  const endpoints = ["/fixtures/lineups", "/injuries"] as const;
+  const payloads: Record<string, unknown> = {};
+  const fetchStatus: Record<string, unknown>[] = [];
+  let remaining = usage.quota_remaining_estimate;
+  for (const endpoint of endpoints) {
+    const params = { fixture: String(target.fixture_id) };
+    const cached = await cacheLookup(db, endpoint, params, input.max_cache_age_minutes);
+    if (cached) {
+      payloads[endpoint] = cached.response_json;
+      fetchStatus.push({ endpoint, status: "CACHE_HIT", cache_key: cached.cache_key });
+      continue;
+    }
+    if (input.dry_run) {
+      fetchStatus.push({ endpoint, status: "WOULD_FETCH" });
+      continue;
+    }
+    if (remaining <= 0) {
+      fetchStatus.push({ endpoint, status: "SKIPPED", reason: "API_FOOTBALL_QUOTA_GUARD" });
+      continue;
+    }
+    const response = await fetchApiFootball(endpoint, params);
+    await recordUsage(db, endpoint, response.headers, response.ok ? "OK" : String(response.reason || "ERROR"));
+    remaining -= 1;
+    if (!response.ok) {
+      fetchStatus.push({
+        endpoint,
+        status: "ERROR",
+        reason: [response.reason, apiFootballErrorSummary(response.json)].filter(Boolean).join(" | ")
+      });
+      continue;
+    }
+    payloads[endpoint] = response.json;
+    await cacheStore(db, endpoint, params, response.json, 0.9, 10);
+    fetchStatus.push({ endpoint, status: "FETCHED" });
+  }
+
+  if (input.dry_run && endpoints.some((endpoint) => !payloads[endpoint])) {
+    return {
+      system_status: "FOOTBALL_OFFICIAL_NEAR_START_DRY_RUN",
+      capture_ready: false,
+      match_id: String(target.match_id),
+      fixture_id: String(target.fixture_id),
+      fetch_status: fetchStatus,
+      quota_remaining_estimate: remaining
+    };
+  }
+
+  const normalized = normalizeApiFootballNearStartPayloads({
+    homeTeam: String(target.home_team),
+    awayTeam: String(target.away_team),
+    lineupsPayload: payloads["/fixtures/lineups"],
+    injuriesPayload: payloads["/injuries"]
+  });
+  const captureReady = Boolean(
+    normalized.source_integrity.lineups_payload_valid &&
+    normalized.source_integrity.availability_payload_valid
+  );
+  const capturedAt = new Date().toISOString();
+  const rawPayload = {
+    provider: PROVIDER,
+    fixture_id: String(target.fixture_id),
+    captured_at: capturedAt,
+    lineups: payloads["/fixtures/lineups"] ?? null,
+    injuries: payloads["/injuries"] ?? null
+  };
+  const providerRawSha256 = captureReady ? canonicalHash(rawPayload) : null;
+  const availabilityProviderRawSha256 = captureReady ? canonicalHash(payloads["/injuries"]) : null;
+  const sourceUrl = `${process.env.API_FOOTBALL_BASE_URL || DEFAULT_BASE_URL}/injuries?fixture=${encodeURIComponent(String(target.fixture_id))}`;
+  return {
+    system_status: captureReady
+      ? "FOOTBALL_OFFICIAL_NEAR_START_CAPTURE_READY"
+      : "FOOTBALL_OFFICIAL_NEAR_START_SOURCE_UNAVAILABLE",
+    capture_ready: captureReady,
+    match_id: String(target.match_id),
+    match: `${target.home_team} vs ${target.away_team}`,
+    home_team: String(target.home_team),
+    away_team: String(target.away_team),
+    league_slug: String(target.league_slug),
+    kickoff: new Date(target.kickoff).toISOString(),
+    minutes_until_start: Number(minutesUntilStart.toFixed(1)),
+    provider: PROVIDER,
+    provider_event_id: String(target.fixture_id),
+    source_url: sourceUrl,
+    captured_at: capturedAt,
+    provider_raw_sha256: providerRawSha256,
+    availability_provider_raw_sha256: availabilityProviderRawSha256,
+    ...normalized,
+    raw_payload: rawPayload,
+    fetch_status: fetchStatus,
+    quota_remaining_estimate: remaining,
+    auto_import: false,
+    guardrails: {
+      human_verification_required: true,
+      real_candidate_count: 0,
+      real_money_enabled: false,
+      kelly_enabled: false,
+      telegram_auto_enabled: false,
+      autopost_enabled: false,
+      kill_switch_enabled: true
+    }
+  };
+}
+
 export async function getFootballDataGatewayStatus(db: Queryable) {
   await ensureGatewayTables(db);
   const usage = await usageStatus(db);
@@ -637,11 +962,13 @@ export async function hydrateFootballIntelligence(db: Queryable, body: unknown) 
   const input = hydrateSchema.parse(body ?? {});
   const usage = await usageStatus(db);
   const targets = await findTargets(db, input);
-  let apiRequestsAllowed = Math.min(input.max_api_requests, usage.quota_remaining_estimate);
+  const generalContextQuota = Math.max(0, usage.quota_remaining_estimate - usage.near_start_reserve);
+  let apiRequestsAllowed = Math.min(input.max_api_requests, generalContextQuota);
   let fetched = 0;
   let cachedHits = 0;
   let skipped = 0;
   let errors = 0;
+  let quotaGuardSkips = 0;
   const rows = [] as Array<Record<string, unknown>>;
 
   for (const target of targets) {
@@ -667,6 +994,7 @@ export async function hydrateFootballIntelligence(db: Queryable, body: unknown) 
       }
       if (apiRequestsAllowed <= 0) {
         skipped += 1;
+        quotaGuardSkips += 1;
         planRows.push({ ...item, status: "SKIPPED", reason: "API_FOOTBALL_QUOTA_GUARD" });
         continue;
       }
@@ -719,7 +1047,9 @@ export async function hydrateFootballIntelligence(db: Queryable, body: unknown) 
     skipped,
     errors,
     quota_remaining_estimate: Math.max(0, usage.quota_remaining_estimate - fetched),
-    blocked_by_quota: !input.dry_run && apiRequestsAllowed <= 0 && wouldFetch > 0,
+    near_start_reserve: usage.near_start_reserve,
+    general_context_quota_remaining: Math.max(0, generalContextQuota - fetched),
+    blocked_by_quota: input.dry_run ? wouldFetch > generalContextQuota : quotaGuardSkips > 0,
     rows,
     recommendation: input.dry_run
       ? "Revisar would_fetch/cache_hits; aplicar solo si targets y fixture_id son correctos."

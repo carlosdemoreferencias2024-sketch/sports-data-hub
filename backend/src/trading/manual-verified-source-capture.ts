@@ -21,6 +21,7 @@ type ManualVerifiedCaptureInput = {
 const ALLOWED_CAPTURE_TYPES = new Set([
   "lineup",
   "goalkeeper",
+  "near_start_context",
   "injuries",
   "suspensions",
   "match_status",
@@ -191,6 +192,56 @@ function computeCapturePatch(
     patch.away_goalkeeper_impact = data.away_goalkeeper_impact ?? null;
     if (patch.goalkeeper_ready) missingResolved.push("goalkeeper");
     else dataStatus = "PARTIAL_ACCEPTED";
+  }
+
+  if (captureType === "near_start_context") {
+    if (sport !== "soccer") throw new Error("near_start_context_only_allowed_for_soccer");
+    const homeLineup = normalizeLineup(data.home_lineup);
+    const awayLineup = normalizeLineup(data.away_lineup);
+    const lineupSourceConfirmed = String(data.lineup_status || "").trim().toUpperCase() === "CONFIRMED";
+    const goalkeeperSourceConfirmed = String(data.goalkeeper_status || "").trim().toUpperCase() === "CONFIRMED";
+    const availabilitySourceConfirmed = String(data.availability_status || "").trim().toUpperCase() === "CONFIRMED";
+    const availabilityProvider = String(data.availability_provider || data.provider || "").trim().toLowerCase();
+    const availabilityProviderHash = String(
+      data.availability_provider_raw_sha256 || data.provider_raw_sha256 || ""
+    ).trim().toLowerCase();
+    const officialAvailabilityEvidence = availabilityProvider === "api_football"
+      && /^[a-f0-9]{64}$/.test(availabilityProviderHash)
+      && Array.isArray(data.unavailable_players)
+      && Array.isArray(data.injuries)
+      && Array.isArray(data.suspensions);
+    const homeReady = lineupSourceConfirmed && homeLineup.length >= 11;
+    const awayReady = lineupSourceConfirmed && awayLineup.length >= 11;
+    const goalkeeperHome = typeof data.goalkeeper_home === "string" ? data.goalkeeper_home.trim() : "";
+    const goalkeeperAway = typeof data.goalkeeper_away === "string" ? data.goalkeeper_away.trim() : "";
+    const availabilityReady = availabilitySourceConfirmed
+      && (boolReady(data.player_availability_manual_verified) || officialAvailabilityEvidence);
+
+    patch.home_lineup = homeLineup;
+    patch.away_lineup = awayLineup;
+    patch.formation_home = data.formation_home || null;
+    patch.formation_away = data.formation_away || null;
+    patch.lineup_ready = homeReady && awayReady;
+    patch.lineup_status = patch.lineup_ready ? "MANUAL_VERIFIED_COMPLETE" : "MANUAL_VERIFIED_PARTIAL";
+    patch.goalkeeper_home = goalkeeperHome || null;
+    patch.goalkeeper_away = goalkeeperAway || null;
+    patch.goalkeeper_ready = goalkeeperSourceConfirmed && Boolean(goalkeeperHome && goalkeeperAway);
+    patch.goalkeeper_status = patch.goalkeeper_ready ? "MANUAL_VERIFIED_COMPLETE" : "MANUAL_VERIFIED_PARTIAL";
+    patch.unavailable_players = Array.isArray(data.unavailable_players) ? data.unavailable_players : [];
+    patch.injuries = Array.isArray(data.injuries) ? data.injuries : [];
+    patch.suspensions = Array.isArray(data.suspensions) ? data.suspensions : [];
+    patch.availability_details = Array.isArray(data.availability_details) ? data.availability_details : [];
+    patch.availability_provider = availabilityProvider || null;
+    patch.availability_provider_raw_sha256 = /^[a-f0-9]{64}$/.test(availabilityProviderHash)
+      ? availabilityProviderHash
+      : null;
+    patch.player_availability_manual_verified = availabilityReady;
+    patch.availability_status = availabilitySourceConfirmed ? "MANUAL_VERIFIED_COMPLETE" : String(data.availability_status || "SOURCE_NOT_PROVIDED");
+
+    if (patch.lineup_ready) missingResolved.push("player_intelligence_lineup");
+    if (patch.goalkeeper_ready) missingResolved.push("goalkeeper");
+    if (availabilityReady) missingResolved.push("player_availability_context");
+    if (!patch.lineup_ready || !patch.goalkeeper_ready || !availabilityReady) dataStatus = "PARTIAL_ACCEPTED";
   }
 
   if (captureType === "injuries" || captureType === "suspensions") {
@@ -391,6 +442,18 @@ export async function recordManualVerifiedSourceCapture(db: Queryable, body: Man
   const verifiedBy = requiredString(body, "verified_by");
   const confidenceScore = parseConfidence(body.confidence_score, source.default_confidence_score);
   const data = dataObject(body.data);
+  if (
+    captureType === "near_start_context"
+    && String(data.availability_provider || data.provider || "").trim().toLowerCase() === "api_football"
+    && sourceName !== "official_league_manual_verified"
+  ) {
+    throw new Error("api_football_availability_requires_official_verified_source");
+  }
+  const upstreamEvidenceHash = String(data.upstream_evidence_sha256 || "").trim().toLowerCase();
+  const providerRawHash = String(data.provider_raw_sha256 || "").trim().toLowerCase();
+  const rawPayloadHash = ODDS_CAPTURE_TYPES.has(captureType)
+    ? (upstreamEvidenceHash || providerRawHash)
+    : (providerRawHash || upstreamEvidenceHash);
 
   const match = await db.query(
     `SELECT id, match_date, status FROM v_valid_matches WHERE id = $1::uuid LIMIT 1`,
@@ -399,13 +462,49 @@ export async function recordManualVerifiedSourceCapture(db: Queryable, body: Man
   if (!match.rows.length) throw new Error("match_id_not_found");
   const kickoff = match.rows[0].match_date ? new Date(match.rows[0].match_date).toISOString() : null;
   const prospectiveCapture = [
-    "lineup", "goalkeeper", "injuries", "suspensions", "match_status",
+    "lineup", "goalkeeper", "near_start_context", "injuries", "suspensions", "match_status",
     "current_odds", "closing_odds", "weather", "pitcher"
   ].includes(captureType);
   if (kickoff && prospectiveCapture) {
     const kickoffMs = new Date(kickoff).getTime();
     if (new Date(capturedAt).getTime() >= kickoffMs) throw new Error("post_kickoff_capture_rejected");
     if (Date.now() >= kickoffMs) throw new Error("prospective_window_closed");
+  }
+  const contextNotes = `Aggregated verified context after ${captureType}`;
+  if (!ODDS_CAPTURE_TYPES.has(captureType) && /^[a-f0-9]{64}$/.test(rawPayloadHash)) {
+    const existingContext = await db.query(
+      `
+        SELECT id
+        FROM forecast_context_snapshots
+        WHERE match_id = $1::uuid
+          AND source_payload_hash = $2
+          AND captured_at = $3::timestamptz
+          AND notes = $4
+        LIMIT 1
+      `,
+      [matchId, rawPayloadHash, capturedAt, contextNotes]
+    );
+    if (existingContext.rows.length) {
+      return {
+        system_status: "MANUAL_VERIFIED_SOURCE_CAPTURE_SAFE_V1",
+        applied: true,
+        rejected: false,
+        idempotent: true,
+        match_id: matchId,
+        sport,
+        source_name: sourceName,
+        capture_type: captureType,
+        forecast_context_snapshot_id: existingContext.rows[0].id,
+        guardrails: {
+          real_candidate_count: 0,
+          real_money_enabled: false,
+          kelly_enabled: false,
+          telegram_auto_enabled: false,
+          kill_switch_enabled: true,
+          confirmed_pick: false
+        }
+      };
+    }
   }
   const computed = computeCapturePatch(sport, captureType, data, capturedAt, kickoff);
   const fingerprint = [
@@ -476,7 +575,6 @@ export async function recordManualVerifiedSourceCapture(db: Queryable, body: Man
     }
   }
 
-  const rawPayloadHash = String(data.upstream_evidence_sha256 || data.provider_raw_sha256 || "").trim().toLowerCase();
   const forecastEvidence: Record<string, any>[] = [];
   if (ODDS_CAPTURE_TYPES.has(captureType)) {
     const screenshotSha256 = String(data.screenshot_sha256 || "").trim().toLowerCase();
@@ -540,7 +638,7 @@ export async function recordManualVerifiedSourceCapture(db: Queryable, body: Man
       goalkeeperConfirmed,
       injuries: { unavailable_players: mergedRawData.unavailable_players || [] },
       missingFields,
-      notes: `Aggregated verified context after ${captureType}`,
+      notes: contextNotes,
       completeness: missingFields.length === 0 ? "complete" : "partial",
       sourceUrl,
       sourcePayloadHash: rawPayloadHash,

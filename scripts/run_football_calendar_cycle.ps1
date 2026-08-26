@@ -70,8 +70,7 @@ try {
     "-HubBaseUrl", $HubBaseUrl,
     "-RepoRoot", $repoRoot,
     "-RuntimeRoot", $RuntimeRoot,
-    "-PythonExe", $PythonExe,
-    "-CaptureMarket"
+    "-PythonExe", $PythonExe
   )
   if ($DryRun) { $scraperArgs += "-DryRun" }
   Invoke-IsolatedStep -Name "football_scraper_pick_cycle" -ScriptPath $scraperScript -Arguments $scraperArgs
