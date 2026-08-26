@@ -229,7 +229,10 @@ function Invoke-FootballContextRefresh([string]$RunDate) {
   Assert-Guardrails "football-context-dry-run" $dry
 
   if ($ApplyFootballContext) {
-    if ([bool]$dry.blocked_by_quota) { throw "football context bloqueado por cuota; no aplico." }
+    if ([bool]$dry.blocked_by_quota) {
+      Write-Host "[football-context] SKIPPED_BY_QUOTA reserve protected; no apply." -ForegroundColor Yellow
+      return
+    }
     $dryErrors = 0; if ($null -ne $dry.errors) { $dryErrors = [int]$dry.errors }; if ($dryErrors -gt 0) { throw "football context dry-run trae errors=$($dry.errors); no aplico." }
     $basePayload.dry_run = $false
     $apply = Invoke-HubPost "/api/v1/internal/analytics/hydrate-football-intelligence" $basePayload
