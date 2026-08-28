@@ -71,8 +71,23 @@ function Register-RepeatingTask(
   ) | Set-Content -LiteralPath $wrapperPath -Encoding ASCII
   $wscriptExe = Join-Path $env:SystemRoot "System32\wscript.exe"
   $action = New-ScheduledTaskAction -Execute $wscriptExe -Argument ('//B //NoLogo "{0}"' -f $wrapperPath) -WorkingDirectory $repoRoot
-  $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes($StartOffsetMinutes) -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) -RepetitionDuration (New-TimeSpan -Days 3650)
-  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes $ExecutionLimitMinutes)
+  $secondOffset = switch ($Name) {
+    "SportsDataHubFootballCalendar" { 5 }
+    "SportsDataHubFootballNearStart" { 10 }
+    "SportsDataHubMlbNearStart" { 25 }
+    "SportsDataHubFootballContext" { 40 }
+    "SportsDataHubClosingWatch" { 50 }
+    "SportsDataHubNflCalendar" { 15 }
+    "SportsDataHubNflNearStart" { 35 }
+    "SportsDataHubNbaCalendar" { 30 }
+    "SportsDataHubNbaNearStart" { 55 }
+    default { 0 }
+  }
+  $startAt = (Get-Date).AddMinutes($StartOffsetMinutes).AddSeconds($secondOffset)
+  $trigger = New-ScheduledTaskTrigger -Once -At $startAt -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) -RepetitionDuration (New-TimeSpan -Days 3650)
+  # Missed pre-game windows are not replayable. Starting overdue tasks after wake
+  # creates a launch stampede and can produce post-kickoff evidence.
+  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes $ExecutionLimitMinutes)
   Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Settings $settings -Description $Description -Force | Out-Null
 }
 
@@ -127,7 +142,7 @@ Register-RepeatingTask "SportsDataHubNflNearStart" $nflNearStartScript @(
   "-RepoRoot", ('"{0}"' -f $repoRoot),
   "-RuntimeRoot", ('"{0}"' -f $RuntimeRoot),
   "-PythonExe", ('"{0}"' -f $PythonExe)
-) 7 $NearStartIntervalMinutes 4 "NFL near-start context; fail closed without official inactives and starting quarterbacks."
+) 10 $NearStartIntervalMinutes 4 "NFL near-start context; fail closed without official inactives and starting quarterbacks."
 
 Register-RepeatingTask "SportsDataHubNbaCalendar" $nbaCalendarScript @(
   "-HubBaseUrl", ('"{0}"' -f $HubBaseUrl),
@@ -143,7 +158,7 @@ Register-RepeatingTask "SportsDataHubNbaNearStart" $nbaNearStartScript @(
   "-RuntimeRoot", ('"{0}"' -f $RuntimeRoot),
   "-PythonExe", ('"{0}"' -f $PythonExe),
   "-Quiet"
-) 9 $NearStartIntervalMinutes 5 "NBA near-start injuries, official starters and schedule-derived workload; fail closed."
+) 11 $NearStartIntervalMinutes 5 "NBA near-start injuries, official starters and schedule-derived workload; fail closed."
 
 foreach ($obsolete in @("SportsDataHubContextRefresh", "SportsDataHubSafeOpsCycle", "SportsDataHubMlbClosingWindow", "SportsDataHubNearStart", "SportsDataHubNbaFairOdds")) {
   if (Get-ScheduledTask -TaskName $obsolete -ErrorAction SilentlyContinue) {
@@ -160,9 +175,9 @@ foreach ($obsolete in @("SportsDataHubContextRefresh", "SportsDataHubSafeOpsCycl
     @{ task="SportsDataHubFootballContext"; interval_minutes=$ContextIntervalMinutes; offset_minutes=4 },
     @{ task="SportsDataHubClosingWatch"; interval_minutes=$ClosingIntervalMinutes; offset_minutes=5 },
     @{ task="SportsDataHubNflCalendar"; interval_minutes=$CalendarIntervalMinutes; offset_minutes=6 },
-    @{ task="SportsDataHubNflNearStart"; interval_minutes=$NearStartIntervalMinutes; offset_minutes=7 },
+    @{ task="SportsDataHubNflNearStart"; interval_minutes=$NearStartIntervalMinutes; offset_minutes=10 },
     @{ task="SportsDataHubNbaCalendar"; interval_minutes=$CalendarIntervalMinutes; offset_minutes=8 },
-    @{ task="SportsDataHubNbaNearStart"; interval_minutes=$NearStartIntervalMinutes; offset_minutes=9 }
+    @{ task="SportsDataHubNbaNearStart"; interval_minutes=$NearStartIntervalMinutes; offset_minutes=11 }
   )
   disabled_duplicates = @("SportsDataHubContextRefresh", "SportsDataHubSafeOpsCycle", "SportsDataHubMlbClosingWindow", "SportsDataHubNearStart", "SportsDataHubNbaFairOdds")
   broad_leagues = $broadLeagues -split ","
