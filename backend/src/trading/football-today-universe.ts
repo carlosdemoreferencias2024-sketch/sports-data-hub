@@ -86,12 +86,17 @@ function toIso(date: Date): string {
   return date.toISOString();
 }
 
-function calendarProviderIdentity(rawData: Record<string, unknown> | undefined) {
+export function calendarProviderIdentity(rawData: Record<string, unknown> | undefined) {
   const raw = rawData ?? {};
   const apiFootballId = String(raw.api_football_fixture_id ?? "").trim();
   if (apiFootballId) return { providerName: "api-football", providerEventId: apiFootballId };
   const espnId = String(raw.espn_event_id ?? "").trim();
   if (espnId) return { providerName: "espn-soccer", providerEventId: espnId };
+  const sourceMatchId = String(raw.source_match_id ?? "").trim();
+  const espnSourceMatch = /^espn-[a-z0-9-]+-(\d+)$/i.exec(sourceMatchId);
+  if (espnSourceMatch) {
+    return { providerName: "espn-soccer", providerEventId: espnSourceMatch[1] };
+  }
   return null;
 }
 
@@ -124,6 +129,38 @@ async function registerCalendarTrust(
       "SELECT * FROM register_forecast_provider_mapping($1::uuid, $2, $3, NULL::uuid, $4)",
       [input.matchId, input.providerName, input.providerEventId, "football_calendar_provider"]
     );
+  }
+
+  const operationalMapping = await db.query(
+    `
+      INSERT INTO provider_event_mappings (
+        hub_match_id, provider_name, provider_event_id, home_team_name,
+        away_team_name, kickoff, is_active, last_verified, raw_data
+      )
+      SELECT
+        forecast_match.match_id, $2, $3, forecast_match.home_team,
+        forecast_match.away_team, forecast_match.scheduled_start, TRUE,
+        clock_timestamp(),
+        jsonb_build_object(
+          'source', 'football_calendar_provider',
+          'calendar_trust_registration', true
+        )
+      FROM forecast_matches forecast_match
+      WHERE forecast_match.match_id = $1::uuid
+      ON CONFLICT (provider_name, provider_event_id) DO UPDATE SET
+        home_team_name = EXCLUDED.home_team_name,
+        away_team_name = EXCLUDED.away_team_name,
+        kickoff = EXCLUDED.kickoff,
+        is_active = TRUE,
+        last_verified = EXCLUDED.last_verified,
+        raw_data = provider_event_mappings.raw_data || EXCLUDED.raw_data
+      WHERE provider_event_mappings.hub_match_id = EXCLUDED.hub_match_id
+      RETURNING id
+    `,
+    [input.matchId, input.providerName, input.providerEventId]
+  );
+  if (operationalMapping.rows.length === 0) {
+    throw new Error(`calendar_provider_event_mapping_conflict:${input.providerName}:${input.providerEventId}`);
   }
 
   const schedule = await db.query(

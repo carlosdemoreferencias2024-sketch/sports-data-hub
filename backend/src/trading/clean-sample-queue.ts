@@ -67,6 +67,65 @@ export function selectOperationalFocusRows(rows: Array<Record<string, any>>) {
   return selected;
 }
 
+function normalizedFixturePart(value: unknown) {
+  return String(value ?? "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function operationalFixtureKey(row: Record<string, any>) {
+  const kickoff = new Date(String(row.kickoff || ""));
+  const kickoffKey = Number.isNaN(kickoff.getTime()) ? String(row.kickoff || "") : kickoff.toISOString();
+  return [
+    normalizedFixturePart(row.sport),
+    normalizedFixturePart(row.league),
+    normalizedFixturePart(row.match),
+    kickoffKey
+  ].join("|");
+}
+
+function operationalFixtureRank(row: Record<string, any>) {
+  let score = 0;
+  if (row.calendar_trusted) score += 100;
+  if (row.model_quote_id) score += 30;
+  if (row.entry_evidence_id) score += 40;
+  if (row.ticket_id) score += 50;
+  if (row.closing_evidence_id) score += 60;
+  const provider = String(row.calendar_provider_name || "").toLowerCase();
+  if (provider === "api-football") score += 20;
+  if (provider === "espn-soccer") score += 10;
+  return score;
+}
+
+export function deduplicateOperationalFixtureRows(rows: Array<Record<string, any>>): Array<Record<string, any>> {
+  const byFixture = new Map<string, Array<Record<string, any>>>();
+  for (const row of rows) {
+    const key = operationalFixtureKey(row);
+    const group = byFixture.get(key) ?? [];
+    group.push(row);
+    byFixture.set(key, group);
+  }
+
+  return [...byFixture.entries()].map(([key, group]) => {
+    const ordered = [...group].sort((a, b) =>
+      operationalFixtureRank(b) - operationalFixtureRank(a)
+      || String(a.match_id || "").localeCompare(String(b.match_id || ""))
+    );
+    const winner = ordered[0];
+    const suppressed = ordered.slice(1).map((row) => String(row.match_id || "")).filter(Boolean);
+    return {
+      ...winner,
+      fixture_dedupe_key: key,
+      duplicate_fixture_rows_suppressed: suppressed.length,
+      suppressed_match_ids: suppressed
+    };
+  });
+}
+
 function isLikelyPlaceholderKickoff(row: Record<string, any>) {
   const kickoff = new Date(String(row.kickoff || ""));
   const sourceMatchId = String(row.source_match_id || "").toLowerCase();
@@ -397,7 +456,7 @@ export async function getCleanSampleQueue(db: Queryable, input: QueueQuery = {})
     `,
     [window.start, window.end, sport, limit]
   );
-  const rows = rowsResult.rows
+  const mappedRows = rowsResult.rows
     .map((row): Record<string, any> => {
       const baseRow = { ...row };
       const withMinutes: Record<string, any> = {
@@ -433,7 +492,8 @@ export async function getCleanSampleQueue(db: Queryable, input: QueueQuery = {})
         no_real_money: true,
         auto_post_allowed: false
       };
-    })
+    });
+  const rows = deduplicateOperationalFixtureRows(mappedRows)
     .sort((a, b) => a.action_priority - b.action_priority || b.focus_score - a.focus_score || Number(a.minutes_until_start ?? 99999) - Number(b.minutes_until_start ?? 99999));
   const focusRows = selectOperationalFocusRows(rows);
   const count = (action: string) => rows.filter((row) => row.action === action).length;
@@ -455,6 +515,8 @@ export async function getCleanSampleQueue(db: Queryable, input: QueueQuery = {})
     },
     summary: {
       scanned: rows.length,
+      raw_scanned: mappedRows.length,
+      duplicate_fixture_rows_suppressed: mappedRows.length - rows.length,
       focus_count: focusRows.length,
       capture_closing_now: count("CAPTURE_CLOSING_NOW"),
       near_start_now: count("RUN_NEAR_START_NOW") + count("RUN_NFL_NEAR_START_NOW") + count("CAPTURE_LINEUP_GOALKEEPER_NOW"),
