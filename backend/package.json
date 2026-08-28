@@ -20,6 +20,7 @@
     "test:nba-fair-odds": "node scripts/test-nba-fair-odds-model.mjs",
     "test:nba-operational-contract": "node scripts/test-nba-operational-contract.mjs",
     "test:owned-fair-odds-backtest": "node scripts/test-owned-fair-odds-backtest.mjs",
+    "test:prospective-validation-cohort": "node scripts/test-prospective-validation-cohort.mjs",
     "test:candidate-preflight": "node scripts/test-candidate-preflight.mjs",
     "test:candidate-preflight-db": "node scripts/test-candidate-preflight-db.mjs",
     "test:scraper-import-guard": "node scripts/test-scraper-import-guard.mjs",
@@ -30,7 +31,8 @@
     "test:safety": "node scripts/run-safety-suite.mjs",
     "backfill:closing-diagnostics": "node scripts/backfill-closing-diagnostics.mjs",
     "validate:historical-replay": "node scripts/validate-single-historical-replay.mjs",
-    "backtest:owned-fair-odds": "node dist/tools/run-owned-fair-odds-backtest.js"
+    "backtest:owned-fair-odds": "node dist/tools/run-owned-fair-odds-backtest.js",
+    "report:prospective-validation": "node dist/tools/run-prospective-validation-cohort.js"
   },
   "dependencies": {
     "@fastify/rate-limit": "^10.3.0",

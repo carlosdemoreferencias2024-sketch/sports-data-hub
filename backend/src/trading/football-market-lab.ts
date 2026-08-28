@@ -594,6 +594,42 @@ export async function processFootballShadowFeed(db: Queryable, body: { dry_run?:
       continue;
     }
 
+    let preflightSnapshot: Record<string, unknown> | null = null;
+    if (!dryRun) {
+      const preflight = await db.query(
+        `
+          SELECT snapshot.id, snapshot.snapshot_hash, snapshot.decision_as_of
+          FROM forecast_candidate_snapshots snapshot
+          JOIN forecast_matches forecast_match ON forecast_match.match_id = snapshot.match_id
+          JOIN forecast_evidence entry_evidence ON entry_evidence.id = snapshot.entry_evidence_id
+          WHERE snapshot.match_id = $1::uuid
+            AND entry_evidence.market_type = $2
+            AND entry_evidence.selection = $3
+            AND snapshot.verdict = 'PASS'
+            AND verify_candidate_snapshot(snapshot.id)
+            AND snapshot.decision_as_of < forecast_match.scheduled_start
+            AND snapshot.created_at < forecast_match.scheduled_start
+            AND clock_timestamp() < forecast_match.scheduled_start
+          ORDER BY snapshot.decision_as_of DESC, snapshot.created_at DESC, snapshot.id DESC
+          LIMIT 1
+        `,
+        [signal.match_id, signal.market, signal.selection]
+      );
+      preflightSnapshot = preflight.rows[0] ?? null;
+      if (!preflightSnapshot) {
+        summary.blocked += 1;
+        rows.push({
+          league_id: leagueId,
+          league_name: league.display_name,
+          market: signal.market,
+          dry_run: dryRun,
+          status: "BLOCKED",
+          reason: "CANDIDATE_PREFLIGHT_PASS_REQUIRED"
+        });
+        continue;
+      }
+    }
+
     const duplicate = await db.query(
       `
         SELECT id
@@ -624,6 +660,14 @@ export async function processFootballShadowFeed(db: Queryable, body: { dry_run?:
       ...(signal.raw_data ?? {}),
       processed: true,
       flow: "shadow_paper",
+      mode: "SHADOW",
+      preflight_snapshot_id: preflightSnapshot?.id ?? null,
+      preflight_snapshot_hash: preflightSnapshot?.snapshot_hash ?? null,
+      preflight_decision_as_of: preflightSnapshot?.decision_as_of ?? null,
+      real_eligible: false,
+      sample_policy: leagueId === "liga-mx"
+        ? "LIGA_MX_RESEARCH_AND_SHADOW_ONLY"
+        : "PROSPECTIVE_VALIDATION_ONLY",
       full_provider_name: providerName,
       odds_source_normalized: oddsSource
     });
