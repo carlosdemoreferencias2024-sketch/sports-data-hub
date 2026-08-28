@@ -2,9 +2,11 @@
 
 ## Clock and publication
 
-- Branch `repair/clean-chain-v1-stabilized` was published through commit `0e18770`.
+- Branch `repair/clean-chain-v1-stabilized` was published through backtest commit `a764939`.
 - The wake-up stampede fix keeps `StartWhenAvailable=false` and staggers the scheduled cycles.
 - API-Football remains at 0/100 calls with its reserve of 20 intact.
+- The nine active Windows tasks were re-registered and validated as `Ready`; every task reports `LastTaskResult=0` with the intended interval and execution limit.
+- The five obsolete tasks remain disabled.
 
 ## Clean Sample Queue and fair odds
 
