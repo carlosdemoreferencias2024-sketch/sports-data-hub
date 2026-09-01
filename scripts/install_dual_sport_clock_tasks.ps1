@@ -58,19 +58,12 @@ function Register-RepeatingTask(
   [string]$Description
 ) {
   if (-not (Test-Path -LiteralPath $ScriptPath)) { throw "Missing task script: $ScriptPath" }
-  $arguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ('"{0}"' -f $ScriptPath)) + $ScriptArgs
+  $arguments = @("-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File", ('"{0}"' -f $ScriptPath)) + $ScriptArgs
   if ($DryRun) { $arguments += "-DryRun" }
   $powerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-  $commandLine = ('"{0}" {1}' -f $powerShellExe, ($arguments -join " "))
-  $escapedCommandLine = $commandLine.Replace('"', '""')
-  $wrapperPath = Join-Path $RuntimeRoot "$Name.vbs"
-  @(
-    'Set shell = CreateObject("WScript.Shell")',
-    ('exitCode = shell.Run("{0}", 0, True)' -f $escapedCommandLine),
-    'WScript.Quit exitCode'
-  ) | Set-Content -LiteralPath $wrapperPath -Encoding ASCII
-  $wscriptExe = Join-Path $env:SystemRoot "System32\wscript.exe"
-  $action = New-ScheduledTaskAction -Execute $wscriptExe -Argument ('//B //NoLogo "{0}"' -f $wrapperPath) -WorkingDirectory $repoRoot
+  # Let Task Scheduler own the real process. A VBS launcher hides the window but
+  # becomes the tracked process, so execution limits can leave PowerShell children orphaned.
+  $action = New-ScheduledTaskAction -Execute $powerShellExe -Argument ($arguments -join " ") -WorkingDirectory $repoRoot
   $secondOffset = switch ($Name) {
     "SportsDataHubFootballCalendar" { 5 }
     "SportsDataHubFootballNearStart" { 10 }
@@ -186,6 +179,6 @@ foreach ($obsolete in @("SportsDataHubContextRefresh", "SportsDataHubSafeOpsCycl
   disabled_duplicates = @("SportsDataHubContextRefresh", "SportsDataHubSafeOpsCycle", "SportsDataHubMlbClosingWindow", "SportsDataHubNearStart", "SportsDataHubNbaFairOdds")
   broad_leagues = $broadLeagues -split ","
   runtime_root = $RuntimeRoot
-  hidden_launcher = "wscript.exe"
+  hidden_launcher = "powershell.exe -WindowStyle Hidden"
   guardrails = @{ real_money=$false; kelly=$false; telegram_auto=$false; autopost=$false }
 } | ConvertTo-Json -Depth 8
