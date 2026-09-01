@@ -63,7 +63,9 @@ function Register-RepeatingTask(
   $powerShellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
   # Let Task Scheduler own the real process. A VBS launcher hides the window but
   # becomes the tracked process, so execution limits can leave PowerShell children orphaned.
-  $action = New-ScheduledTaskAction -Execute $powerShellExe -Argument ($arguments -join " ") -WorkingDirectory $repoRoot
+  # Start outside OneDrive so PowerShell command discovery and child-process
+  # launch cannot stall on a synchronized working directory.
+  $action = New-ScheduledTaskAction -Execute $powerShellExe -Argument ($arguments -join " ") -WorkingDirectory $RuntimeRoot
   $secondOffset = switch ($Name) {
     "SportsDataHubFootballCalendar" { 5 }
     "SportsDataHubFootballNearStart" { 10 }
@@ -80,7 +82,14 @@ function Register-RepeatingTask(
   $trigger = New-ScheduledTaskTrigger -Once -At $startAt -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) -RepetitionDuration (New-TimeSpan -Days 3650)
   # Missed pre-game windows are not replayable. Starting overdue tasks after wake
   # creates a launch stampede and can produce post-kickoff evidence.
-  $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes $ExecutionLimitMinutes)
+  # These workers are interval-driven, not idle jobs. The scheduler default
+  # StopOnIdleEnd=true sends Ctrl+C (0xC000013A) as soon as user activity resumes.
+  $settings = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -DontStopOnIdleEnd `
+    -MultipleInstances IgnoreNew `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes $ExecutionLimitMinutes)
   Register-ScheduledTask -TaskName $Name -Action $action -Trigger $trigger -Settings $settings -Description $Description -Force | Out-Null
 }
 
