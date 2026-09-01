@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 $ScriptPath = Join-Path $PSScriptRoot "resume_sports_data_hub.ps1"
 $Action = New-ScheduledTaskAction `
   -Execute "powershell.exe" `
-  -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
+  -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`""
 $Trigger = New-ScheduledTaskTrigger -AtLogOn
 $Trigger.Delay = "PT${DelayMinutes}M"
 $Settings = New-ScheduledTaskSettingsSet `

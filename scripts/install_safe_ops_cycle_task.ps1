@@ -28,6 +28,9 @@ function Add-Arg([System.Collections.Generic.List[string]]$Args, [string]$Name, 
 
 $argsList = New-Object System.Collections.Generic.List[string]
 $argsList.Add("-NoProfile")
+$argsList.Add("-NonInteractive")
+$argsList.Add("-WindowStyle")
+$argsList.Add("Hidden")
 $argsList.Add("-ExecutionPolicy")
 $argsList.Add("Bypass")
 $argsList.Add("-File")

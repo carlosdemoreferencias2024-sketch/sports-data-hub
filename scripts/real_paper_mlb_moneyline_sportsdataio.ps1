@@ -258,5 +258,5 @@ $loaderArgs = @(
 if ($DryRun) { $loaderArgs += "-DryRun" }
 if ($QuotesOnly) { $loaderArgs += "-QuotesOnly" }
 
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $loader @loaderArgs
+& powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File $loader @loaderArgs
 exit $LASTEXITCODE

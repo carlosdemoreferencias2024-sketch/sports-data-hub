@@ -34,7 +34,7 @@ function Invoke-IsolatedStep {
     $startedAt = (Get-Date).ToString("o")
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    $output = & $powershellExe -NoProfile -ExecutionPolicy Bypass -File $ScriptPath @Arguments 2>&1 | Out-String
+    $output = & $powershellExe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File $ScriptPath @Arguments 2>&1 | Out-String
     $exitCode = $LASTEXITCODE
     $ErrorActionPreference = $previousErrorActionPreference
     @(

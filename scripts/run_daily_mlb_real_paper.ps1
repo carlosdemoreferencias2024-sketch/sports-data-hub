@@ -57,7 +57,7 @@ try {
   if ($DryRun) { $quoteArgs += "-DryRun" }
 
   Invoke-Step "cargar SportsDataIO MLB Moneyline $dateIso" {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "real_paper_mlb_moneyline_sportsdataio.ps1") @quoteArgs
+    & powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "real_paper_mlb_moneyline_sportsdataio.ps1") @quoteArgs
   }
 
   if (-not $ClosingOnly) {

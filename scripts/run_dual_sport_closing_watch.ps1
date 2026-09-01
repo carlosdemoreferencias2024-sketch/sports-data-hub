@@ -70,7 +70,7 @@ if ($focusLock.focus) {
   if ($focusMinutes -ge 3 -and $focusMinutes -le 10 -and $hasEntry -and -not $hasClosing) {
     Write-ClockLog "FOOTBALL_CAPTURE_START" "match_id=$focusMatchId minutes=$([Math]::Round($focusMinutes,1))"
     $footballArgs = @(
-      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $scriptRoot "run_football_scraper_cycle.ps1"),
+      "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $scriptRoot "run_football_scraper_cycle.ps1"),
       "-Date", $Date, "-RepoRoot", $repoRoot, "-RuntimeRoot", $RuntimeRoot,
       "-HubBaseUrl", $HubBaseUrl, "-InternalApiKey", $InternalApiKey,
       "-MatchId", $focusMatchId, "-SnapshotType", "closing", "-CaptureMarket", "-AutoImportProviderEvidence"
@@ -87,7 +87,8 @@ if ($mlbNow.Count -gt 0) {
   Write-ClockLog "MLB_CAPTURE_START" "count=$($mlbNow.Count)"
   $args = @("-Date", $Date)
   if ($DryRun) { $args += "-DryRun" }
-  $mlbOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scriptRoot "run_mlb_closing_window_cycle.ps1") @args 2>&1 | Out-String
+  $mlbRunner = Join-Path $repoRoot "scripts\run_mlb_closing_window_cycle.ps1"
+  $mlbOutput = & powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File $mlbRunner @args 2>&1 | Out-String
   if ($LASTEXITCODE -ne 0) { throw "MLB_CLOSING_WATCH_FAILED exit=$LASTEXITCODE detail=$mlbOutput" }
   Write-ClockLog "MLB_CAPTURE_DONE"
 }

@@ -82,4 +82,4 @@ if ($DryRun) {
 }
 
 Write-Host "[auto-mlb] mode=$mode date=$Date capture_closing_now=$captureClosingNow fixed_hour_ignored=$ClosingHourLocal dry_run=$DryRun"
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "run_daily_mlb_real_paper.ps1") @argsList
+& powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "run_daily_mlb_real_paper.ps1") @argsList

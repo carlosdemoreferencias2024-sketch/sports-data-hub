@@ -11,7 +11,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $runner = Join-Path $PSScriptRoot "run_mlb_closing_window_cycle.ps1"
 if (-not (Test-Path -LiteralPath $runner)) { throw "No existe $runner" }
 
-$arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$runner`""
+$arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$runner`""
 if ($DryRun) { $arguments += " -DryRun" }
 
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments -WorkingDirectory $repoRoot

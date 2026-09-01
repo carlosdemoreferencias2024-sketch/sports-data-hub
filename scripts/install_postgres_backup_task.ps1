@@ -16,7 +16,7 @@ if (-not (Test-Path -LiteralPath $ScriptPath)) {
 
 $Action = New-ScheduledTaskAction `
   -Execute "powershell.exe" `
-  -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`" -RetentionDays $RetentionDays" `
+  -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`" -RetentionDays $RetentionDays" `
   -WorkingDirectory $RepoRoot
 
 $Trigger = New-ScheduledTaskTrigger -Daily -At $Time

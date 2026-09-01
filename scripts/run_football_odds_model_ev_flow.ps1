@@ -65,6 +65,8 @@ Write-Host "[football-odds-model-ev] step=football-shadow-feed"
 
 $feedArgs = @(
   "-NoProfile",
+  "-NonInteractive",
+  "-WindowStyle", "Hidden",
   "-ExecutionPolicy", "Bypass",
   "-File", (Join-Path $PSScriptRoot "run_football_shadow_feed.ps1"),
   "-HubBaseUrl", $HubBaseUrl,

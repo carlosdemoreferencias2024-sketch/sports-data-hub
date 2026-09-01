@@ -13,5 +13,5 @@ $arguments = @("-Date", $Date, "-ForceClosing")
 if ($DryRun) { $arguments += "-DryRun" }
 
 Write-Host "[mlb-closing-window-cycle] checking date=$Date dry_run=$DryRun"
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runner @arguments
+& powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File $runner @arguments
 exit $LASTEXITCODE

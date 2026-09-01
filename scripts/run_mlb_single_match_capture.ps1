@@ -80,7 +80,7 @@ $providerArgs = @(
 )
 if ($DryRun) { $providerArgs += "-DryRun" }
 
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $providerScript @providerArgs
+& powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File $providerScript @providerArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "[single-match] complete role=$SnapshotType picks_created=0 real_candidate=0 money_real=OFF kelly=OFF telegram=OFF kill_switch=ON"

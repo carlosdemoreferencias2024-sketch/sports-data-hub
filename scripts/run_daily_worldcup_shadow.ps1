@@ -67,7 +67,7 @@ try {
     }
 
     Invoke-Step "alimentar manual_shadow_worldcup" {
-      & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "manual_shadow_worldcup.ps1") @shadowArgs
+      & powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "manual_shadow_worldcup.ps1") @shadowArgs
     }
 
     Invoke-Step "pipeline Mundial despues de cuotas shadow" {

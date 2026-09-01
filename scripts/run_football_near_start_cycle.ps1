@@ -84,7 +84,7 @@ if ($entryWindowActive -and -not (Get-Prop $queueRow "entry_evidence_id" "")) {
     Write-ClockLog "ENTRY_CAPTURE_START" "match_id=$matchId minutes=$([Math]::Round($minutes,1))"
     $scraperScript = Join-Path $repoRoot "scripts\run_football_scraper_cycle.ps1"
     $scraperArgs = @(
-      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $scraperScript,
+      "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File", $scraperScript,
       "-Date", $Date, "-RepoRoot", $repoRoot, "-RuntimeRoot", $RuntimeRoot,
       "-PythonExe", $PythonExe, "-HubBaseUrl", $HubBaseUrl, "-InternalApiKey", $InternalApiKey,
       "-MatchId", $matchId, "-SnapshotType", "current", "-CaptureMarket", "-AutoImportProviderEvidence"

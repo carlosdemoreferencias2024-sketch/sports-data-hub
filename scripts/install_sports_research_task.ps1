@@ -14,6 +14,9 @@ if (-not (Test-Path -LiteralPath $runner)) { throw "No existe $runner" }
 
 $argsList = New-Object System.Collections.Generic.List[string]
 $argsList.Add("-NoProfile")
+$argsList.Add("-NonInteractive")
+$argsList.Add("-WindowStyle")
+$argsList.Add("Hidden")
 $argsList.Add("-ExecutionPolicy")
 $argsList.Add("Bypass")
 $argsList.Add("-File")

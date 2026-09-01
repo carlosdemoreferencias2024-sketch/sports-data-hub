@@ -27,7 +27,12 @@ $rows = foreach ($name in $expected.Keys | Sort-Object) {
   $interval = [string]$task.Triggers[0].Repetition.Interval
   $limit = [string]$task.Settings.ExecutionTimeLimit
   $overLimit = $task.State -eq "Running" -and $info.LastRunTime -and ((Get-Date) - $info.LastRunTime).TotalMinutes -gt [System.Xml.XmlConvert]::ToTimeSpan($expected[$name].limit).TotalMinutes
-  $hiddenLauncher = [System.IO.Path]::GetFileName([string]$task.Actions[0].Execute).ToLowerInvariant() -eq "wscript.exe"
+  $action = $task.Actions[0]
+  $launcherName = [System.IO.Path]::GetFileName([string]$action.Execute).ToLowerInvariant()
+  $actionArguments = [string]$action.Arguments
+  $hiddenLauncher = $launcherName -eq "powershell.exe" -and
+    $actionArguments -match '(?i)(?:^|\s)-NonInteractive(?:\s|$)' -and
+    $actionArguments -match '(?i)(?:^|\s)-WindowStyle\s+Hidden(?:\s|$)'
   $resultOk = $info.LastTaskResult -eq 0 -or ($task.State -eq "Running" -and $info.LastTaskResult -eq 267009)
   [pscustomobject]@{
     task=$name
