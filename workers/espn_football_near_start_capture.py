@@ -109,6 +109,17 @@ def fetch_official_context(url: str, api_key: str, match_id: str, timeout: int) 
     return response.json()
 
 
+def import_formal_context(url: str, api_key: str, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
+    response = requests.post(
+        url,
+        json=payload,
+        headers={"Content-Type": "application/json", "X-Internal-API-Key": api_key, "X-API-Key": api_key},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def validate_summary_identity(payload: dict[str, Any], target: dict[str, Any], provider_slug: str) -> dict[str, Any]:
     header = payload.get("header") or {}
     context = event_context(header, provider_slug, allow_post_kickoff=False)
@@ -319,6 +330,10 @@ def main() -> int:
         default="http://127.0.0.1:4000/api/v1/internal/analytics/football/near-start-capture/official-context",
     )
     parser.add_argument(
+        "--formal-context-import-url",
+        default="http://127.0.0.1:4000/api/v1/internal/analytics/football/provider-near-start-capture",
+    )
+    parser.add_argument(
         "--output-root",
         default=str(Path(__file__).resolve().parents[1] / "uploads" / "source-captures" / "scraper-inbox"),
     )
@@ -333,6 +348,7 @@ def main() -> int:
         print(json.dumps({"system_status": "FOOTBALL_NEAR_START_CAPTURE_NO_TARGET", "draft_created": False}))
         return 0
     provider_name = str(target.get("provider_name") or "").lower().replace("_", "-")
+    formal_payload: dict[str, Any]
     if "api-football" in provider_name:
         official_capture = fetch_official_context(
             args.official_context_api_url, args.api_key, str(target["match_id"]), args.timeout
@@ -349,6 +365,7 @@ def main() -> int:
             return 0
         payload = official_capture.get("raw_payload") or {}
         draft = build_official_draft(target, official_capture)
+        formal_payload = official_capture
     else:
         league_slug = "nwsl" if str(target["league_slug"]) == "football-observed-nwsl" else str(target["league_slug"])
         provider_slug = league_provider_slugs(league_slug)[0]
@@ -356,10 +373,24 @@ def main() -> int:
         payload = fetch_json(source_url, args.timeout)
         captured_at = utc_now()
         draft = build_draft(target, payload, source_url, captured_at)
+        formal_payload = {
+            "match_id": str(target["match_id"]),
+            "captured_at": iso_z(captured_at),
+            "source_url": source_url,
+            **draft["data"],
+        }
     draft_path = None
     created = False
     if not args.dry_run:
         draft_path, created = persist_draft(draft, payload, Path(args.output_root))
+    provider_import = None
+    if not args.dry_run:
+        provider_import = import_formal_context(
+            args.formal_context_import_url,
+            args.api_key,
+            formal_payload,
+            args.timeout,
+        )
     print(json.dumps({
         "system_status": "FOOTBALL_NEAR_START_CAPTURE_DRAFT_READY",
         "match_id": target["match_id"],
@@ -373,7 +404,8 @@ def main() -> int:
         "lineup_status": draft["data"]["lineup_status"],
         "goalkeeper_status": draft["data"]["goalkeeper_status"],
         "availability_status": draft["data"]["availability_status"],
-        "auto_import": False,
+        "auto_import": bool(provider_import),
+        "provider_import": provider_import,
         "picks_created": 0,
         "real_candidate": 0,
     }, ensure_ascii=True))

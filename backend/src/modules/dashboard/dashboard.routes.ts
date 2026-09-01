@@ -4159,6 +4159,29 @@ const dashboardHtml = String.raw`<!doctype html>
           bestBetsPerMatch
         });
 
+        const normalizedHealth = {
+          ...health,
+          counts: {
+            total_picks: 0,
+            real_candidate: 0,
+            real_paper_candidate: 0,
+            radar_only: 0,
+            review: 0,
+            no_bet: 0,
+            processed_true: 0,
+            processed_false: 0,
+            ...(health.counts || {})
+          },
+          providers: {
+            real_active: 0,
+            shadow_active: 0,
+            real: [],
+            shadow: [],
+            ...(health.providers || {})
+          },
+          latest: health.latest || {},
+          review_types: health.review_types || []
+        };
         renderTable("dataHealth", [
           { label: "Total picks", value: r => r.counts.total_picks },
           { label: "Real", value: r => r.counts.real_candidate },
@@ -4173,7 +4196,7 @@ const dashboardHtml = String.raw`<!doctype html>
           { label: "Ultima real", value: r => fmtDateTime(r.latest.real) },
           { label: "Ultima shadow", value: r => fmtDateTime(r.latest.shadow) },
           { label: "Review types", value: r => (r.review_types || []).map(x => x.type + ": " + x.count).join(", ") || "-" }
-        ], [health]);
+        ], [normalizedHealth]);
 
         renderTable("internalOddsHub", [
           { label: "Provider", value: r => providerDisplay(r) },
@@ -5068,13 +5091,24 @@ const dashboardHtml = String.raw`<!doctype html>
           { label: "Flat Profit", value: r => r.theoretical_flat_profit_units + "u" }
         ], perf.performance || []);
 
+        const normalizedPaper = {
+          ...paper,
+          banco_control_actual_mxn: paper.banco_control_actual_mxn || 0,
+          balance_neto_mxn: paper.balance_neto_mxn || 0,
+          auditoria: {
+            roi_percentage: 0,
+            yield_percentage: 0,
+            total_picks: 0,
+            ...(paper.auditoria || {})
+          }
+        };
         renderTable("paper", [
           { label: "Banco", value: r => r.banco_control_actual_mxn },
           { label: "Balance", value: r => r.balance_neto_mxn },
           { label: "ROI", value: r => r.auditoria.roi_percentage + "%" },
           { label: "Yield", value: r => r.auditoria.yield_percentage + "%" },
           { label: "Picks", value: r => r.auditoria.total_picks }
-        ], [paper]);
+        ], [normalizedPaper]);
 
         renderTable("realPerformance", [
           { label: "Model", value: r => r.model_name || "-" },
@@ -5134,8 +5168,6 @@ export async function dashboardRoutes(app: FastifyInstance) {
     return reply.header("content-type", "text/html; charset=utf-8").send(dashboardHtml);
   });
 }
-
-
 
 
 

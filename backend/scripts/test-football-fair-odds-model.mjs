@@ -51,6 +51,9 @@ assert.equal(result.training_cutoff_date, "2026-08-04");
 assert.equal(result.basis.market_inputs_used, false);
 assert.equal(result.basis.home_sample_size, 5);
 assert.equal(result.basis.away_sample_size, 5);
+assert.deepEqual(result.basis.home_feature_match_ids, ["h1", "h2", "h3", "h4", "h5"]);
+assert.deepEqual(result.basis.away_feature_match_ids, ["a1", "a2", "a3", "a4", "a5"]);
+assert.deepEqual(result.basis.data_sources, ["verified_test_source"]);
 assert.match(footballFairOddsArtifactSha256(), /^[a-f0-9]{64}$/);
 assert.equal(FOOTBALL_FAIR_ODDS_MODEL_CONFIG.min_form_matches, 3);
 

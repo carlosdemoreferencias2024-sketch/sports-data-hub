@@ -1,6 +1,7 @@
 param(
   [string]$Date = (Get-Date -Format "yyyy-MM-dd"),
   [string]$RepoRoot = "",
+  [string]$RuntimeRoot = "C:\Users\tsacl\Documents\SportsDataHubRuntime",
   [string]$HubBaseUrl = "http://127.0.0.1:4000",
   [string]$InternalApiKey = $(if ($env:INTERNAL_API_KEY) { $env:INTERNAL_API_KEY } else { $env:SPORTS_DATA_HUB_INTERNAL_KEY }),
   [switch]$DryRun
@@ -55,6 +56,32 @@ $mlbNow = @($captureNow | Where-Object { ([string](Get-Prop $_ "sport" "")).ToLo
 $footballNow = @($captureNow | Where-Object { ([string](Get-Prop $_ "sport" "")).ToLowerInvariant() -in @("soccer","football") })
 $nflNow = @($captureNow | Where-Object { ([string](Get-Prop $_ "sport" "")).ToLowerInvariant() -in @("american_football","american-football","nfl") })
 
+$footballOutput = ""
+$focusBody = @{ date=$Date } | ConvertTo-Json -Depth 5
+$focusLock = Invoke-RestMethod -Method Post -Uri "$HubBaseUrl/api/v1/internal/analytics/football/operational-focus/acquire" -Headers $headers -ContentType "application/json" -Body $focusBody -TimeoutSec 60
+if ($focusLock.focus) {
+  $focusMatchId = [string]$focusLock.focus.match_id
+  $focusKickoff = [DateTimeOffset]::Parse([string]$focusLock.focus.kickoff).ToUniversalTime()
+  $focusMinutes = ($focusKickoff - [DateTimeOffset]::UtcNow).TotalMinutes
+  $cleanQueue = Invoke-RestMethod -Method Get -Uri "$HubBaseUrl/api/v1/internal/analytics/clean-sample-queue?date=$dateQuery&sport=soccer&limit=240" -Headers $headers -TimeoutSec 60
+  $focusRow = @($cleanQueue.rows | Where-Object { [string]$_.match_id -eq $focusMatchId }) | Select-Object -First 1
+  $hasEntry = [bool](Get-Prop $focusRow "entry_evidence_id" "")
+  $hasClosing = [bool](Get-Prop $focusRow "closing_evidence_id" "")
+  if ($focusMinutes -ge 3 -and $focusMinutes -le 10 -and $hasEntry -and -not $hasClosing) {
+    Write-ClockLog "FOOTBALL_CAPTURE_START" "match_id=$focusMatchId minutes=$([Math]::Round($focusMinutes,1))"
+    $footballArgs = @(
+      "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $scriptRoot "run_football_scraper_cycle.ps1"),
+      "-Date", $Date, "-RepoRoot", $repoRoot, "-RuntimeRoot", $RuntimeRoot,
+      "-HubBaseUrl", $HubBaseUrl, "-InternalApiKey", $InternalApiKey,
+      "-MatchId", $focusMatchId, "-SnapshotType", "closing", "-CaptureMarket", "-AutoImportProviderEvidence"
+    )
+    if ($DryRun) { $footballArgs += "-DryRun" }
+    $footballOutput = @(& powershell.exe @footballArgs 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0) { throw "FOOTBALL_CLOSING_WATCH_FAILED exit=$LASTEXITCODE detail=$footballOutput" }
+    Write-ClockLog "FOOTBALL_CAPTURE_DONE" "match_id=$focusMatchId"
+  }
+}
+
 $mlbOutput = ""
 if ($mlbNow.Count -gt 0) {
   Write-ClockLog "MLB_CAPTURE_START" "count=$($mlbNow.Count)"
@@ -72,6 +99,9 @@ if ($mlbNow.Count -gt 0) {
   mlb_capture_invoked = ($mlbNow.Count -gt 0)
   mlb_output = $mlbOutput.Trim()
   football_capture_required = @($footballNow | Select-Object match_id,match,kickoff,minutes_to_start,action)
+  football_capture_invoked = -not [string]::IsNullOrWhiteSpace($footballOutput)
+  football_output = $footballOutput.Trim()
+  football_focus = $focusLock.focus
   nfl_capture_required = @($nflNow | Select-Object match_id,match,kickoff,minutes_to_start,action)
   real_money_enabled = $false
 } | ConvertTo-Json -Depth 8

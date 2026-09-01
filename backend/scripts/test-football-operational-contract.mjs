@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { selectOperationalFocusRows } from "../dist/trading/clean-sample-queue.js";
 import { evaluateCalendarTrust } from "../dist/trading/calendar-trust-gate.js";
+import {
+  evaluateFootballHistoricalTrust,
+  footballHistoricalConfidenceBand
+} from "../dist/trading/football-historical-trust-gate.js";
 import { buildCandidateQueueRow } from "../dist/trading/operational-window-orchestrator.js";
 
 const rows = [
@@ -34,6 +38,39 @@ assert.deepEqual(untrustedCalendar.reasons, [
   "SCHEDULE_NOT_VALID:PENDING_CHECK",
   "IDENTITY_NOT_VALID:MISSING"
 ]);
+
+const trustedHistoryInput = {
+  matchId: "history-1",
+  providerEventId: "401900001",
+  kickoffAt: "2026-08-10T20:00:00.000Z",
+  targetKickoffAt: "2026-08-25T20:00:00.000Z",
+  identityValidation: "VALID",
+  scheduleValidation: "VALID",
+  resultStatus: "FINAL",
+  synthetic: false,
+  invalidated: false
+};
+const trustedHistory = evaluateFootballHistoricalTrust(trustedHistoryInput);
+assert.equal(trustedHistory.trusted, true);
+assert.equal(footballHistoricalConfidenceBand(3, 8), "BOOTSTRAP");
+assert.equal(footballHistoricalConfidenceBand(5, 8), "LOW");
+assert.equal(footballHistoricalConfidenceBand(8, 8), "MEDIUM");
+
+const leakingHistory = evaluateFootballHistoricalTrust({
+  ...trustedHistoryInput,
+  matchId: "history-future",
+  providerEventId: "401900002",
+  kickoffAt: "2026-08-26T20:00:00.000Z",
+  targetKickoffAt: "2026-08-25T20:00:00.000Z",
+  identityValidation: "VALID",
+  scheduleValidation: "VALID",
+  resultStatus: "FINAL",
+  synthetic: true,
+  invalidated: false
+});
+assert.equal(leakingHistory.trusted, false);
+assert.ok(leakingHistory.reasons.includes("NOT_PRE_TARGET"));
+assert.ok(leakingHistory.reasons.includes("SYNTHETIC_NOT_EXPLICITLY_FALSE"));
 
 const focus = selectOperationalFocusRows(rows);
 assert.deepEqual(focus.map((row) => row.match_id), ["soccer-a", "mlb-a", "soccer-closing"]);

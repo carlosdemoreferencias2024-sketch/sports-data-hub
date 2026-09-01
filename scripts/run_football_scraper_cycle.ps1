@@ -7,7 +7,11 @@ param(
   [string]$InternalApiKey = $(if ($env:INTERNAL_API_KEY) { $env:INTERNAL_API_KEY } else { $env:SPORTS_DATA_HUB_INTERNAL_KEY }),
   [double]$MinEv = 0.03,
   [double]$MinConfidence = 0.50,
+  [string]$MatchId = "",
+  [ValidateSet("current", "closing")]
+  [string]$SnapshotType = "current",
   [switch]$CaptureMarket,
+  [switch]$AutoImportProviderEvidence,
   [switch]$Quiet,
   [switch]$DryRun
 )
@@ -49,13 +53,36 @@ function Invoke-HubJson([string]$Method, [string]$Path, [object]$Body = $null, [
   Invoke-RestMethod @params
 }
 
-$queue = Invoke-HubJson "Get" "/api/v1/internal/analytics/clean-sample-queue?date=$([uri]::EscapeDataString($Date))&sport=soccer&limit=120"
-$focus = @($queue.focus_rows) | Select-Object -First 1
-if (-not $focus) {
+$reconciliation = try {
+  Invoke-HubJson "Post" "/api/v1/internal/analytics/football/operational-results/reconcile" @{ date = $Date } 120
+} catch {
+  [pscustomobject]@{ system_status = "FOOTBALL_OPERATIONAL_RESULT_RECONCILIATION_UNAVAILABLE"; error = $_.Exception.Message }
+}
+$focusBody = @{ date = $Date }
+if ($MatchId) { $focusBody.match_id = $MatchId }
+$focusLock = Invoke-HubJson "Post" "/api/v1/internal/analytics/football/operational-focus/acquire" $focusBody
+if (-not $focusLock.focus) {
   if (-not $Quiet) {
-    [pscustomobject]@{ system_status = "FOOTBALL_SCRAPER_NO_FOCUS"; date = $Date; decision = "NO_PICK" } | ConvertTo-Json -Depth 6
+    [pscustomobject]@{
+      system_status = "FOOTBALL_SCRAPER_NO_FOCUS"
+      date = $Date
+      decision = "NO_PICK"
+      focus_status = $focusLock.system_status
+      reconciliation = $reconciliation
+    } | ConvertTo-Json -Depth 8
   }
   exit 0
+}
+$lockedMatchId = [string]$focusLock.focus.match_id
+$queue = Invoke-HubJson "Get" "/api/v1/internal/analytics/clean-sample-queue?date=$([uri]::EscapeDataString($Date))&sport=soccer&limit=120"
+$focus = @($queue.rows | Where-Object { [string]$_.match_id -eq $lockedMatchId }) | Select-Object -First 1
+if (-not $focus) {
+  $focus = [pscustomobject]@{
+    match_id = $lockedMatchId
+    match = "$([string]$focusLock.focus.away_team) @ $([string]$focusLock.focus.home_team)"
+    kickoff = $focusLock.focus.kickoff
+    league = $focusLock.focus.league_slug
+  }
 }
 
 $kickoff = if ($focus.kickoff -is [DateTime]) {
@@ -91,6 +118,7 @@ $workerArgs = @(
   "--expected-away", $expectedAway,
   "--expected-kickoff", $kickoff.ToString("o"),
   "--league-slug", $providerLeagueSlug,
+  "--snapshot-type", $SnapshotType,
   "--api-key", $InternalApiKey,
   "--history-api-url", "$HubBaseUrl/api/v1/internal/analytics/ingest-historical-matches",
   "--output-root", (Join-Path $repoRoot "uploads\source-captures\scraper-inbox"),
@@ -98,6 +126,9 @@ $workerArgs = @(
 )
 if (-not $DryRun) { $workerArgs += "--apply-history" }
 if ($CaptureMarket) { $workerArgs += "--capture-market" }
+if ($CaptureMarket -and $AutoImportProviderEvidence -and -not $DryRun) {
+  $workerArgs += @("--provider-capture-api-url", "$HubBaseUrl/api/v1/internal/analytics/football/provider-market-capture")
+}
 
 $workerOutput = @(& $PythonExe @workerArgs 2>&1)
 if ($LASTEXITCODE -ne 0) { throw "Football scraper failed: $($workerOutput -join ' ')" }
@@ -167,7 +198,7 @@ $candidatePreflight = try {
 $blockers = [Collections.Generic.List[string]]::new()
 if (-not $moneyline) { $blockers.Add("FAIR_ODDS_V3_MISSING") }
 if (-not $market) { $blockers.Add("FORMAL_1X2_MARKET_MISSING") }
-if ($market) { $blockers.Add("HUMAN_EVIDENCE_VERIFICATION_REQUIRED") }
+if ($market -and -not $market.provider_import) { $blockers.Add("HUMAN_EVIDENCE_VERIFICATION_REQUIRED") }
 if ($moneyline -and [double]$moneyline.confidence -lt $MinConfidence) { $blockers.Add("MODEL_CONFIDENCE_BELOW_THRESHOLD") }
 if ($best -and [double]$best.expected_value -lt $MinEv) { $blockers.Add("EV_BELOW_THRESHOLD") }
 if (-not [bool]$candidatePreflight.eligible_for_shadow_ticket) { $blockers.Add("CANDIDATE_PREFLIGHT_NOT_PASS") }
@@ -212,6 +243,7 @@ $result = [pscustomobject]@{
     screenshot_sha256 = [string]$market.screenshot_sha256
     evidence_id = [string]$market.evidence_id
     captured_at = [string]$market.captured_at
+    provider_import = $market.provider_import
   } } else { $null }
   fair_odds = @{
     priced_matches = $fair.priced_matches
@@ -225,6 +257,8 @@ $result = [pscustomobject]@{
     eligible_for_shadow_ticket = [bool]$candidatePreflight.eligible_for_shadow_ticket
   }
   blockers = @($blockers | Select-Object -Unique)
+  focus_lock = $focusLock.focus
+  reconciliation = $reconciliation
   guardrails = @{
     picks_created = 0
     max_paper_shadow = 1

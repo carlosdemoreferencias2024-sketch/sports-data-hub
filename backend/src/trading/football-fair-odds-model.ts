@@ -19,9 +19,11 @@ export type FootballFormObservation = {
 };
 
 export type FootballFairOddsInput = {
+  targetMatchId?: string;
   homeTeam: string;
   awayTeam: string;
   asOf: string;
+  targetKickoffAt?: string;
   homeForm: FootballFormObservation[];
   awayForm: FootballFormObservation[];
 };
@@ -265,6 +267,8 @@ export function computeFootballFairOdds(input: FootballFairOddsInput) {
       market_inputs_used: false,
       home_team: input.homeTeam,
       away_team: input.awayTeam,
+      target_match_id: input.targetMatchId ?? null,
+      target_kickoff_at: input.targetKickoffAt ?? null,
       as_of: asOf.toISOString(),
       home_sample_size: homeForm.length,
       away_sample_size: awayForm.length,
@@ -275,6 +279,9 @@ export function computeFootballFairOdds(input: FootballFairOddsInput) {
       away_weighted_goals_against: Number(awayMeans.goalsAgainst.toFixed(6)),
       minimum_source_confidence: minimumSourceConfidence,
       evidence_sha256: evidenceSha256,
+      data_sources: [...new Set([...homeForm, ...awayForm].map((row) => row.source))],
+      home_feature_match_ids: [...new Set(homeForm.map((row) => row.matchId))],
+      away_feature_match_ids: [...new Set(awayForm.map((row) => row.matchId))],
       feature_match_ids: [...new Set([...homeForm, ...awayForm].map((row) => row.matchId))]
     }
   };

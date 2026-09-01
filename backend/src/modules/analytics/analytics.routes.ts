@@ -60,6 +60,10 @@ import { getOperationalWindowQueue } from "../../trading/operational-window-orch
 import { getOperationalAlerts } from "../../trading/operational-alerts.js";
 import { getCleanSampleQueue } from "../../trading/clean-sample-queue.js";
 import { loadCalendarTrustDecisions } from "../../trading/calendar-trust-gate.js";
+import {
+  evaluateFootballHistoricalTrust,
+  footballHistoricalConfidenceBand
+} from "../../trading/football-historical-trust-gate.js";
 import { getOddsSnapshotCache, recordManualOddsSnapshot } from "../../trading/odds-snapshot-cache.js";
 import { getShadowTicketChain } from "../../trading/shadow-ticket-chain.js";
 import {
@@ -8804,11 +8808,13 @@ export async function analyticsRoutes(app: FastifyInstance) {
     };
     const verifiedFormFor = async (teamName: string, kickoff: unknown): Promise<FootballFormObservation[]> => {
       if (!teamName) return [];
+      const targetKickoffAt = new Date(String(kickoff || generatedAtIso)).toISOString();
       const result = await db.query(
         `
           SELECT
             tms.match_id,
-            mh.match_date,
+            COALESCE(mh.kickoff, mh.match_date) AS match_date,
+            mh.status AS result_status,
             tms.points_for,
             tms.points_against,
             tms.is_home,
@@ -8822,6 +8828,15 @@ export async function analyticsRoutes(app: FastifyInstance) {
               mh.raw_data->>'screenshot_sha256',
               mh.raw_data->>'provider_raw_sha256'
             ) AS evidence_sha256,
+            COALESCE(
+              mh.provider_match_id,
+              mh.raw_data->>'provider_event_id',
+              tms.raw_data->>'provider_event_id'
+            ) AS provider_event_id,
+            COALESCE(mh.raw_data->>'identity_validation', tms.raw_data->>'identity_validation') AS identity_validation,
+            COALESCE(mh.raw_data->>'schedule_validation', tms.raw_data->>'schedule_validation') AS schedule_validation,
+            COALESCE(mh.raw_data->>'synthetic', tms.raw_data->>'synthetic') AS synthetic,
+            COALESCE(mh.raw_data->>'invalidated', tms.raw_data->>'invalidated') AS invalidated,
             CASE WHEN COALESCE(tms.raw_data->>'xg_for', tms.raw_data->>'xgFor', '') ~ '^[0-9]+(\\.[0-9]+)?$'
               THEN COALESCE(tms.raw_data->>'xg_for', tms.raw_data->>'xgFor')::numeric END AS xg_for,
             CASE WHEN COALESCE(tms.raw_data->>'xg_against', tms.raw_data->>'xgAgainst', '') ~ '^[0-9]+(\\.[0-9]+)?$'
@@ -8832,36 +8847,53 @@ export async function analyticsRoutes(app: FastifyInstance) {
           JOIN sports_match_history mh ON mh.match_id = tms.match_id
           WHERE tms.sport IN ('football', 'soccer')
             AND tms.normalized_team_name = $1
-            AND mh.match_date < $2::timestamptz
-            AND UPPER(mh.status) IN ('FINAL', 'FINISHED', 'FT')
+            AND COALESCE(mh.kickoff, mh.match_date) < $2::timestamptz
             AND tms.points_for IS NOT NULL
             AND tms.points_against IS NOT NULL
             AND tms.source_confidence_score >= $3
-          ORDER BY mh.match_date DESC
+          ORDER BY COALESCE(mh.kickoff, mh.match_date) DESC
           LIMIT $4
         `,
         [
           normalizedTeamName(teamName),
-          new Date(String(kickoff || generatedAtIso)).toISOString(),
+          targetKickoffAt,
           modelConfig.min_source_confidence,
-          modelConfig.max_form_matches
+          modelConfig.max_form_matches * 10
         ]
       );
-      return result.rows.map((formRow: Record<string, any>) => ({
-        matchId: String(formRow.match_id),
-        playedAt: new Date(formRow.match_date).toISOString(),
-        goalsFor: Number(formRow.points_for),
-        goalsAgainst: Number(formRow.points_against),
-        isHome: formRow.is_home === null ? null : Boolean(formRow.is_home),
-        source: String(formRow.source),
-        sourceConfidenceScore: Number(formRow.source_confidence_score),
-        evidenceSha256: formRow.evidence_sha256 ? String(formRow.evidence_sha256) : null,
-        capturedAt: new Date(formRow.captured_at).toISOString(),
-        featureAsOf: new Date(formRow.feature_as_of).toISOString(),
-        xgFor: numberOrNull(formRow.xg_for),
-        xgAgainst: numberOrNull(formRow.xg_against),
-        opponentElo: numberOrNull(formRow.opponent_elo)
-      }));
+      const explicitBoolean = (value: unknown): boolean | null => {
+        if (value === true || value === "true") return true;
+        if (value === false || value === "false") return false;
+        return null;
+      };
+      return result.rows
+        .filter((formRow: Record<string, any>) => evaluateFootballHistoricalTrust({
+          matchId: String(formRow.match_id),
+          providerEventId: formRow.provider_event_id ? String(formRow.provider_event_id) : null,
+          kickoffAt: formRow.match_date ? new Date(formRow.match_date).toISOString() : null,
+          targetKickoffAt,
+          identityValidation: formRow.identity_validation,
+          scheduleValidation: formRow.schedule_validation,
+          resultStatus: formRow.result_status,
+          synthetic: explicitBoolean(formRow.synthetic),
+          invalidated: explicitBoolean(formRow.invalidated)
+        }).trusted)
+        .slice(0, modelConfig.max_form_matches)
+        .map((formRow: Record<string, any>) => ({
+          matchId: String(formRow.match_id),
+          playedAt: new Date(formRow.match_date).toISOString(),
+          goalsFor: Number(formRow.points_for),
+          goalsAgainst: Number(formRow.points_against),
+          isHome: formRow.is_home === null ? null : Boolean(formRow.is_home),
+          source: String(formRow.source),
+          sourceConfidenceScore: Number(formRow.source_confidence_score),
+          evidenceSha256: formRow.evidence_sha256 ? String(formRow.evidence_sha256) : null,
+          capturedAt: new Date(formRow.captured_at).toISOString(),
+          featureAsOf: new Date(formRow.feature_as_of).toISOString(),
+          xgFor: numberOrNull(formRow.xg_for),
+          xgAgainst: numberOrNull(formRow.xg_against),
+          opponentElo: numberOrNull(formRow.opponent_elo)
+        }));
     };
     const verifiedContextFor = async (matchId: string, kickoff: unknown): Promise<FootballFairOddsContext> => {
       const result = await db.query(
@@ -8956,9 +8988,11 @@ export async function analyticsRoutes(app: FastifyInstance) {
         verifiedContextFor(String(row.match_id), row.kickoff)
       ]);
       const modelInput = {
+        targetMatchId: String(row.match_id),
         homeTeam: teams.homeTeam,
         awayTeam: teams.awayTeam,
         asOf: generatedAtIso,
+        targetKickoffAt: new Date(String(row.kickoff)).toISOString(),
         homeForm,
         awayForm
       };
@@ -9031,6 +9065,16 @@ export async function analyticsRoutes(app: FastifyInstance) {
           required: {
             min_verified_matches_per_team: modelConfig.min_form_matches,
             min_source_confidence: modelConfig.min_source_confidence,
+            historical_trust_required: [
+              "provider_event_id",
+              "kickoff",
+              "identity_validation=VALID",
+              "schedule_validation=VALID",
+              "result_status=FINAL",
+              "synthetic=false",
+              "invalidated=false",
+              "kickoff<target_kickoff"
+            ],
             pre_kickoff_only: true,
             market_inputs_allowed: false
           }
@@ -9043,6 +9087,10 @@ export async function analyticsRoutes(app: FastifyInstance) {
       };
       const confidence = differentiatedModel.confidence;
       const artifactSha256 = useV3 ? footballFairOddsV3ArtifactSha256() : footballFairOddsArtifactSha256();
+      const historicalConfidence = footballHistoricalConfidenceBand(
+        Number(differentiatedModel.basis.home_sample_size),
+        Number(differentiatedModel.basis.away_sample_size)
+      );
       const modelVersionLabel = `${modelConfig.model_family}-cutoff-${differentiatedModel.training_cutoff_date}`;
       if (query.apply) {
         await db.query("SELECT * FROM register_forecast_match($1::uuid)", [row.match_id]);
@@ -9079,6 +9127,23 @@ export async function analyticsRoutes(app: FastifyInstance) {
         feature_schema_version: modelConfig.feature_schema_version,
         fair_odds_method_version: modelConfig.fair_odds_method_version,
         market_inputs_used: false,
+        fair_odds_evidence: {
+          target_match_id: String(row.match_id),
+          target_kickoff_at: new Date(String(row.kickoff)).toISOString(),
+          as_of: generatedAtIso,
+          home_sample_size: differentiatedModel.basis.home_sample_size,
+          away_sample_size: differentiatedModel.basis.away_sample_size,
+          home_historical_match_ids: differentiatedModel.basis.home_feature_match_ids,
+          away_historical_match_ids: differentiatedModel.basis.away_feature_match_ids,
+          historical_match_ids: differentiatedModel.basis.feature_match_ids,
+          evidence_sha256: differentiatedModel.basis.evidence_sha256,
+          data_sources: differentiatedModel.basis.data_sources,
+          model_version: modelConfig.fair_odds_method_version,
+          confidence: historicalConfidence,
+          historical_trust_schema: "football_historical_trust_v1"
+        },
+        real_candidate_eligible: false,
+        shadow_only: true,
         independence_attestation: "Market quote is comparison-only and was not used to generate probabilities.",
         target_model_family: "dixon_coles_market_blend_v1",
         calibration_route: "Dixon-Coles + market no-vig blend after closed sample gate",
@@ -9124,6 +9189,7 @@ export async function analyticsRoutes(app: FastifyInstance) {
         draw_min_market_odds_for_ev: minMarketOdds(probabilities.draw),
         away_min_market_odds_for_ev: minMarketOdds(probabilities.away),
         confidence,
+        confidence_band: historicalConfidence,
         model_family: modelConfig.model_family,
         model_version_label: modelVersionLabel,
         model_version_id: modelVersion?.id ?? null,

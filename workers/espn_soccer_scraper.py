@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import html
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -53,6 +54,30 @@ def iso_z(value: datetime) -> str:
 
 def canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _normalize_for_javascript_json(value: object) -> object:
+    if isinstance(value, dict):
+        return {key: _normalize_for_javascript_json(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [_normalize_for_javascript_json(item) for item in value]
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        if value == 0 or (value.is_integer() and abs(value) < 1e21):
+            return int(value)
+    return value
+
+
+def canonical_provider_json(value: object) -> str:
+    """Match the backend's canonicalize + JSON.stringify contract for provider payloads."""
+    return json.dumps(
+        _normalize_for_javascript_json(value),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
 
 
 def sha256_text(value: str) -> str:
@@ -417,20 +442,21 @@ def completed_history_events(context: dict, timeout: int) -> tuple[list[dict], l
     events: dict[str, dict] = {}
     captures: list[dict] = []
     for team in (context["home"], context["away"]):
-        url = schedule_url(context["league_slug"], team["id"], context["kickoff"].year)
-        payload = fetch_json(url, timeout)
-        captures.append({"url": url, "payload": payload})
-        for event in payload.get("events") or []:
-            competition = competition_for(event)
-            status_type = (competition.get("status") or {}).get("type") or {}
-            played_at_raw = competition.get("date") or event.get("date")
-            if not played_at_raw or not bool(status_type.get("completed")):
-                continue
-            if parse_datetime(played_at_raw) >= context["kickoff"]:
-                continue
-            event_id = str(event.get("id") or competition.get("id") or "")
-            if event_id:
-                events[event_id] = event
+        for season in (context["kickoff"].year, context["kickoff"].year - 1):
+            url = schedule_url(context["league_slug"], team["id"], season)
+            payload = fetch_json(url, timeout)
+            captures.append({"url": url, "payload": payload})
+            for event in payload.get("events") or []:
+                competition = competition_for(event)
+                status_type = (competition.get("status") or {}).get("type") or {}
+                played_at_raw = competition.get("date") or event.get("date")
+                if not played_at_raw or not bool(status_type.get("completed")):
+                    continue
+                if parse_datetime(played_at_raw) >= context["kickoff"]:
+                    continue
+                event_id = str(event.get("id") or competition.get("id") or "")
+                if event_id:
+                    events[event_id] = {**event, "_history_source_url": url}
     return list(events.values()), captures
 
 
@@ -460,9 +486,15 @@ def build_history_rows(context: dict, events: list[dict], captures: list[dict], 
         raw = {
             "provider": "espn_site_api",
             "provider_event_id": event_id,
+            "identity_validation": "VALID",
+            "schedule_validation": "VALID",
+            "result_status": "FINAL",
+            "synthetic": False,
+            "invalidated": False,
+            "historical_trust_schema": "football_historical_trust_v1",
             "provider_raw_sha256": capture_sha,
             "provider_capture_path": capture_path,
-            "source_url": schedule_url(context["league_slug"], context["home"]["id"], context["kickoff"].year),
+            "source_url": str(event.get("_history_source_url") or ""),
             "captured_at": captured_at,
             "capture_mode": "LIVE_FORWARD_HISTORICAL_BACKFILL",
             "no_post_event_market_data_used": True,
@@ -540,6 +572,21 @@ def post_history(matches: list[dict], team_stats: list[dict], api_url: str, api_
     return response.json()
 
 
+def post_provider_market_capture(api_url: str, api_key: str, payload: dict, timeout: int) -> dict:
+    if not api_url:
+        return {}
+    if not api_key:
+        raise RuntimeError("INTERNAL_API_KEY_REQUIRED")
+    response = requests.post(
+        api_url,
+        json=payload,
+        headers={"Content-Type": "application/json", "X-Internal-API-Key": api_key, "X-API-Key": api_key},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def market_capture(args: argparse.Namespace, event: dict, initial_payload: dict, source_url: str, context: dict) -> dict:
     now = utc_now()
     minutes = (context["kickoff"] - now).total_seconds() / 60
@@ -560,7 +607,7 @@ def market_capture(args: argparse.Namespace, event: dict, initial_payload: dict,
     price_fields = ("home_american", "draw_american", "away_american", "bookmaker")
     if any(market_before[key] != market_after[key] for key in price_fields):
         raise RuntimeError("MARKET_MOVED_DURING_CAPTURE")
-    provider_raw_sha = sha256_text(canonical_json(payload_after))
+    provider_raw_sha = sha256_text(canonical_provider_json(payload_after))
     render_path = output_dir / f"espn_soccer__{context['event_id']}__{args.snapshot_type}_odds.html"
     write_market_render(render_path, source_url, context, market_after, provider_raw_sha, iso_z(stamp))
     capture_screenshot(find_browsers(args.chrome_path), render_path.resolve().as_uri(), screenshot_path, args.browser_timeout)
@@ -645,14 +692,34 @@ def market_capture(args: argparse.Namespace, event: dict, initial_payload: dict,
     draft_path = output_dir / f"espn__{context['event_id']}__{evidence_sha[:32]}.json"
     draft_path.write_text(json.dumps(draft, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
     (output_dir / f"espn__{context['event_id']}__source_response.json").write_text(json.dumps(payload_after, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    provider_import = None
+    if args.provider_capture_api_url:
+        provider_import = post_provider_market_capture(
+            args.provider_capture_api_url,
+            args.api_key,
+            {
+                "match_id": args.match_id,
+                "source_name": "espn_provider_api",
+                "source_url": source_url,
+                "source_event_id": context["event_id"],
+                "capture_type": capture_type,
+                "captured_at": iso_z(captured_at),
+                "screenshot_sha256": screenshot_sha,
+                "raw_payload_hash": provider_raw_sha,
+                "raw_payload": payload_after,
+                "data": data,
+            },
+            args.timeout,
+        )
     return {
-        "status": "PENDING_HUMAN_VERIFICATION",
+        "status": "PROVIDER_API_IMPORTED" if provider_import else "PENDING_HUMAN_VERIFICATION",
         "draft_path": str(draft_path.resolve()),
         "screenshot_path": str(screenshot_path.resolve()),
         "screenshot_sha256": screenshot_sha,
         "evidence_id": evidence_sha[:32],
         "captured_at": iso_z(captured_at),
         "minutes_to_kickoff": round((context["kickoff"] - captured_at).total_seconds() / 60, 1),
+        "provider_import": provider_import,
         **market_after,
     }
 
@@ -676,6 +743,7 @@ def main() -> int:
     parser.add_argument("--apply-history", action="store_true")
     parser.add_argument("--api-key", default=os.environ.get("INTERNAL_API_KEY", ""))
     parser.add_argument("--history-api-url", default="http://127.0.0.1:4000/api/v1/internal/analytics/ingest-historical-matches")
+    parser.add_argument("--provider-capture-api-url", default="")
     parser.add_argument("--output-root", default=str(Path(__file__).resolve().parents[1] / "uploads" / "source-captures" / "scraper-inbox"))
     parser.add_argument("--evidence-root", default=str(Path(__file__).resolve().parents[1] / "uploads" / "provider-evidence" / "football"))
     parser.add_argument("--chrome-path", default="")

@@ -16,6 +16,8 @@ $contextScript = Join-Path $RuntimeRoot "run_context_refresh.ps1"
 if (-not (Test-Path -LiteralPath $contextScript)) { $contextScript = Join-Path $repoRoot "scripts\run_context_refresh.ps1" }
 $scraperScript = Join-Path $RuntimeRoot "run_football_scraper_cycle.ps1"
 if (-not (Test-Path -LiteralPath $scraperScript)) { $scraperScript = Join-Path $repoRoot "scripts\run_football_scraper_cycle.ps1" }
+$slateFairOddsScript = Join-Path $RuntimeRoot "run_football_slate_fair_odds.ps1"
+if (-not (Test-Path -LiteralPath $slateFairOddsScript)) { $slateFairOddsScript = Join-Path $repoRoot "scripts\run_football_slate_fair_odds.ps1" }
 $powershellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $logDir = Join-Path $RuntimeRoot "logs"
 $logPath = Join-Path $logDir "football_calendar_latest.log"
@@ -64,6 +66,15 @@ try {
   )
   if (-not $DryRun) { $calendarArgs += "-ApplyCalendar" }
   Invoke-IsolatedStep -Name "football_calendar_refresh" -ScriptPath $contextScript -Arguments $calendarArgs
+
+  $fairOddsArgs = @(
+    "-Date", $Date,
+    "-HubBaseUrl", $HubBaseUrl,
+    "-RepoRoot", $repoRoot,
+    "-Limit", "120"
+  )
+  if ($DryRun) { $fairOddsArgs += "-DryRun" }
+  Invoke-IsolatedStep -Name "football_slate_fair_odds" -ScriptPath $slateFairOddsScript -Arguments $fairOddsArgs
 
   $scraperArgs = @(
     "-Date", $Date,

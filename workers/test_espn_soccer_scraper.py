@@ -6,10 +6,13 @@ from unittest.mock import patch
 
 from espn_soccer_scraper import (
     american_to_decimal,
+    canonical_provider_json,
+    completed_history_events,
     discover_event,
     event_context,
     league_provider_slugs,
     moneyline_market,
+    sha256_text,
     team_match_score,
     team_name_matches,
     write_market_render,
@@ -46,6 +49,21 @@ class EspnSoccerScraperContractTest(unittest.TestCase):
         self.assertEqual(team_match_score("LDU de Quito", context["home"]), 25)
         self.assertTrue(team_name_matches("Mirassol", context["away"]))
         self.assertEqual(team_match_score("Mirassol", context["away"]), 100)
+
+    def test_provider_hash_matches_backend_javascript_canonicalization(self):
+        payload = {
+            "z": 1.0,
+            "a": {"accent": "León", "fraction": 1.25, "values": [0.0, -0.0, 2.0]},
+        }
+        canonical = canonical_provider_json(payload)
+        self.assertEqual(
+            canonical,
+            '{"a":{"accent":"León","fraction":1.25,"values":[0,0,2]},"z":1}',
+        )
+        self.assertEqual(
+            sha256_text(canonical),
+            "662bae3d9ad51ec3e4b0cd7aa14375ddec62ae1451441dfd1ec7187acad7b178",
+        )
 
     def test_identity_accepts_known_provider_alias(self):
         team = {
@@ -161,6 +179,19 @@ class EspnSoccerScraperContractTest(unittest.TestCase):
         self.assertEqual(market["draw_american"], 280)
         self.assertEqual(market["away_american"], 500)
         self.assertEqual(market["home_decimal"], american_to_decimal(-175))
+
+    @patch("espn_soccer_scraper.fetch_json")
+    def test_history_queries_current_and_previous_season_for_both_teams(self, fetch_json):
+        fetch_json.return_value = {"events": []}
+        context = event_context(self.event, "conmebol.libertadores")
+
+        events, captures = completed_history_events(context, 10)
+
+        self.assertEqual(events, [])
+        self.assertEqual(len(captures), 4)
+        called_urls = [call.args[0] for call in fetch_json.call_args_list]
+        self.assertTrue(any("season=2026" in url for url in called_urls))
+        self.assertTrue(any("season=2025" in url for url in called_urls))
 
     def test_started_event_is_rejected(self):
         self.event["status"]["type"]["state"] = "in"

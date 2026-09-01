@@ -19,7 +19,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = if ($RepoRoot) { [System.IO.Path]::GetFullPath($RepoRoot) } else { Split-Path -Parent $PSScriptRoot }
 $sourceScriptRoot = Join-Path $repoRoot "scripts"
 if (-not (Test-Path -LiteralPath $RuntimeRoot)) { New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null }
-foreach ($entrypoint in @("run_context_refresh.ps1", "run_football_calendar_cycle.ps1", "run_football_scraper_cycle.ps1", "run_football_near_start_cycle.ps1", "run_mlb_near_start_cycle.ps1", "run_mlb_near_start_context.ps1", "run_mlb_matchup_features.ps1", "run_nfl_calendar_cycle.ps1", "run_nfl_owned_fair_odds.ps1", "run_nfl_near_start_cycle.ps1", "run_nba_calendar_cycle.ps1", "run_nba_near_start_cycle.ps1", "run_nba_owned_fair_odds.ps1", "run_dual_sport_closing_watch.ps1")) {
+foreach ($entrypoint in @("run_context_refresh.ps1", "run_football_calendar_cycle.ps1", "run_football_scraper_cycle.ps1", "run_football_slate_fair_odds.ps1", "run_football_near_start_cycle.ps1", "run_mlb_near_start_cycle.ps1", "run_mlb_near_start_context.ps1", "run_mlb_matchup_features.ps1", "run_mlb_owned_fair_odds.ps1", "run_nfl_calendar_cycle.ps1", "run_nfl_owned_fair_odds.ps1", "run_nfl_near_start_cycle.ps1", "run_nba_calendar_cycle.ps1", "run_nba_near_start_cycle.ps1", "run_nba_owned_fair_odds.ps1", "run_dual_sport_closing_watch.ps1")) {
   Copy-Item -LiteralPath (Join-Path $sourceScriptRoot $entrypoint) -Destination (Join-Path $RuntimeRoot $entrypoint) -Force
 }
 Copy-Item -LiteralPath (Join-Path $repoRoot "workers\nfl_scraper.py") -Destination (Join-Path $RuntimeRoot "nfl_scraper.py") -Force
@@ -115,7 +115,11 @@ Register-RepeatingTask "SportsDataHubFootballNearStart" $footballNearStartScript
   "-RepoRoot", ('"{0}"' -f $repoRoot)
 ) 2 $NearStartIntervalMinutes 5 "Football near-start orchestrator; independent from MLB."
 
-Register-RepeatingTask "SportsDataHubMlbNearStart" $mlbNearStartScript @("-RepoRoot", ('"{0}"' -f $repoRoot)) 3 $NearStartIntervalMinutes 4 "MLB near-start orchestrator; independent from football."
+Register-RepeatingTask "SportsDataHubMlbNearStart" $mlbNearStartScript @(
+  "-RepoRoot", ('"{0}"' -f $repoRoot),
+  "-RuntimeRoot", ('"{0}"' -f $RuntimeRoot),
+  "-HubBaseUrl", ('"{0}"' -f $HubBaseUrl)
+) 3 $NearStartIntervalMinutes 4 "MLB fair odds plus near-start context; independent from football."
 
 Register-RepeatingTask "SportsDataHubFootballContext" $contextScript @(
   "-HubBaseUrl", ('"{0}"' -f $HubBaseUrl),

@@ -4,7 +4,9 @@ export const ALLOWED_MARKET_SOURCES = new Set([
   "sportsbook_manual_verified",
   "bookmaker_manual_verified",
   "sportsdataio_manual_verified",
-  "the_odds_api_manual_verified"
+  "the_odds_api_manual_verified",
+  "espn_provider_api",
+  "api_football_provider_api"
 ]);
 
 export type IntegrityDecision = {
