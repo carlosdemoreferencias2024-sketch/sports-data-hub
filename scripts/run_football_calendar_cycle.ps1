@@ -5,7 +5,7 @@ param(
   [string]$PythonExe = "C:\Users\tsacl\AppData\Local\Python\pythoncore-3.14-64\python.exe",
   [string]$HubBaseUrl = "http://127.0.0.1:4000",
   [string]$LeagueIds = "mls,liga-mx,nwsl,brasileirao-serie-a,argentina-primera-division,uefa-champions-league,europa-league,conference-league,leagues-cup,copa-libertadores,copa-sudamericana,premier-league,la-liga,serie-a,bundesliga",
-  [int]$MaxAttempts = 3,
+  [int]$MaxAttempts = 1,
   [switch]$DryRun
 )
 
