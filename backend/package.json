@@ -32,8 +32,10 @@
     "check:live-safe-mode": "node scripts/check-live-safe-mode.mjs",
     "test:safety": "node scripts/run-safety-suite.mjs",
     "backfill:closing-diagnostics": "node scripts/backfill-closing-diagnostics.mjs",
+    "test:soccer-poisson-walk-forward": "node scripts/test-soccer-poisson-walk-forward.mjs",
     "validate:historical-replay": "node scripts/validate-single-historical-replay.mjs",
     "backtest:owned-fair-odds": "node dist/tools/run-owned-fair-odds-backtest.js",
+    "backtest:soccer-poisson-walk-forward": "node dist/tools/run-soccer-poisson-walk-forward.js",
     "report:prospective-validation": "node dist/tools/run-prospective-validation-cohort.js"
   },
   "dependencies": {
